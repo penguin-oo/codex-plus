@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.CodexMobile" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/bg_panel</item>
+        <item name="colorPrimaryDark">@color/bg_app</item>
+        <item name="colorAccent">@color/accent_main</item>
+        <item name="android:windowBackground">@color/bg_app</item>
+        <item name="android:statusBarColor">@color/bg_app</item>
+        <item name="android:navigationBarColor">@color/bg_app</item>
+        <item name="android:textColorPrimary">@color/text_main</item>
+        <item name="android:textColorSecondary">@color/text_muted</item>
+        <item name="toolbarStyle">@style/Widget.CodexMobile.Toolbar</item>
+        <item name="alertDialogTheme">@style/ThemeOverlay.CodexMobile.AlertDialog</item>
+        <item name="android:alertDialogTheme">@style/ThemeOverlay.CodexMobile.AlertDialog</item>
+    </style>
+
+    <style name="Widget.CodexMobile.Toolbar" parent="Widget.AppCompat.Toolbar">
+        <item name="android:background">@color/bg_panel</item>
+        <item name="titleTextColor">@color/text_main</item>
+        <item name="subtitleTextColor">@color/text_muted</item>
+    </style>
+
+    <style name="ThemeOverlay.CodexMobile.PopupMenu" parent="ThemeOverlay.AppCompat.Dark">
+        <item name="android:popupBackground">@drawable/bg_popup_menu</item>
+        <item name="android:textAppearanceLargePopupMenu">@style/TextAppearance.CodexMobile.PopupMenu</item>
+        <item name="android:textAppearanceSmallPopupMenu">@style/TextAppearance.CodexMobile.PopupMenu</item>
+        <item name="textAppearanceLargePopupMenu">@style/TextAppearance.CodexMobile.PopupMenu</item>
+        <item name="textAppearanceSmallPopupMenu">@style/TextAppearance.CodexMobile.PopupMenu</item>
+    </style>
+
+    <style name="TextAppearance.CodexMobile.PopupMenu" parent="TextAppearance.AppCompat.Body1">
+        <item name="android:textColor">@color/text_main</item>
+    </style>
+
+    <style name="ThemeOverlay.CodexMobile.AlertDialog" parent="ThemeOverlay.AppCompat.Dialog.Alert">
+        <item name="android:windowBackground">@color/dialog_surface</item>
+        <item name="android:colorAccent">@color/accent_main</item>
+        <item name="colorAccent">@color/accent_main</item>
+        <item name="android:textColorPrimary">@color/text_main</item>
+        <item name="android:textColorSecondary">@color/text_muted</item>
+        <item name="android:background">@color/dialog_surface</item>
+        <item name="buttonBarPositiveButtonStyle">@style/Widget.CodexMobile.AlertButton</item>
+        <item name="buttonBarNegativeButtonStyle">@style/Widget.CodexMobile.AlertButton</item>
+        <item name="android:editTextStyle">@style/Widget.CodexMobile.DialogEditText</item>
+        <item name="editTextStyle">@style/Widget.CodexMobile.DialogEditText</item>
+    </style>
+
+    <style name="Widget.CodexMobile.AlertButton" parent="Widget.AppCompat.Button.ButtonBar.AlertDialog">
+        <item name="android:textColor">@color/accent_main</item>
+    </style>
+
+    <style name="Widget.CodexMobile.DialogEditText" parent="Widget.AppCompat.EditText">
+        <item name="android:textColor">@color/text_main</item>
+        <item name="android:textColorHint">@color/text_muted</item>
+        <item name="android:backgroundTint">@color/dialog_input_stroke</item>
+    </style>
+</resources>

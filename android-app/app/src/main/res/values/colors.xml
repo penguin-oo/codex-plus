@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_app">#0B0D10</color>
+    <color name="bg_panel">#111418</color>
+    <color name="bg_panel_alt">#171B20</color>
+    <color name="bg_card">#1D2329</color>
+    <color name="bg_card_active">#17352F</color>
+    <color name="bg_user">#174A5F</color>
+    <color name="bg_assistant">#161B21</color>
+    <color name="stroke_soft">#303841</color>
+    <color name="accent_main">#44C2A8</color>
+    <color name="accent_warn">#F6B667</color>
+    <color name="danger_main">#F97066</color>
+    <color name="text_main">#EEF2F6</color>
+    <color name="text_muted">#98A2AD</color>
+    <color name="dialog_surface">#111418</color>
+    <color name="dialog_surface_alt">#1D2329</color>
+    <color name="dialog_input_stroke">#3E4852</color>
+    <color name="white">#FFFFFF</color>
+</resources>
