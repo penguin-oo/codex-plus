@@ -62,6 +62,33 @@ class OpenAICompatibleConfigTests(unittest.TestCase):
             calls,
         )
 
+    def test_detect_openai_compatible_protocol_sends_codex_compatible_headers(self) -> None:
+        seen_headers: list[dict[str, str]] = []
+
+        def fake_post(url: str, headers: dict[str, str], payload: bytes, timeout: float) -> tuple[int, str]:
+            seen_headers.append(dict(headers))
+            return 200, '{"id":"resp_test","output":[{"type":"message"}]}'
+
+        with mock.patch.object(
+            token_pool_settings,
+            '_http_post_json',
+            side_effect=fake_post,
+        ), mock.patch.object(
+            token_pool_settings,
+            'normalize_openai_base_url',
+            side_effect=lambda url, *a, **kw: url.strip().rstrip('/'),
+        ):
+            protocol, _resolved = token_pool_settings.detect_openai_compatible_protocol(
+                'https://provider.example.test/v1',
+                'sk-test',
+                'gpt-5.5',
+            )
+
+        self.assertEqual(token_pool_settings.OPENAI_PROTOCOL_RESPONSES, protocol)
+        self.assertTrue(seen_headers)
+        self.assertEqual('codex_exec', seen_headers[0].get('originator'))
+        self.assertTrue(seen_headers[0].get('User-Agent', '').startswith('codex_exec/'))
+
     def test_detect_openai_compatible_protocol_falls_back_to_chat_completions(self) -> None:
         calls: list[str] = []
 
@@ -94,6 +121,42 @@ class OpenAICompatibleConfigTests(unittest.TestCase):
             [
                 'https://token-plan-sgp.xiaomimimo.com/v1/responses',
                 'https://token-plan-sgp.xiaomimimo.com/v1/chat/completions',
+            ],
+            calls,
+        )
+
+    def test_detect_openai_compatible_protocol_accepts_chat_quota_error_as_supported(self) -> None:
+        calls: list[str] = []
+
+        def fake_post(url: str, headers: dict[str, str], payload: bytes, timeout: float) -> tuple[int, str]:
+            calls.append(url)
+            if url.endswith('/responses'):
+                return 404, '{"error":"not found"}'
+            if url.endswith('/chat/completions'):
+                return 403, '{"error":{"message":"insufficient quota","code":"insufficient_user_quota"}}'
+            return 404, '{}'
+
+        with mock.patch.object(
+            token_pool_settings,
+            '_http_post_json',
+            side_effect=fake_post,
+        ), mock.patch.object(
+            token_pool_settings,
+            'normalize_openai_base_url',
+            side_effect=lambda url, *a, **kw: url.strip().rstrip('/'),
+        ):
+            protocol, resolved = token_pool_settings.detect_openai_compatible_protocol(
+                'https://provider.example.test/v1',
+                'sk-test',
+                'gpt-5.5',
+            )
+
+        self.assertEqual(token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS, protocol)
+        self.assertEqual('https://provider.example.test/v1', resolved)
+        self.assertEqual(
+            [
+                'https://provider.example.test/v1/responses',
+                'https://provider.example.test/v1/chat/completions',
             ],
             calls,
         )
@@ -665,4 +728,58 @@ class OpenAICompatibleConfigTests(unittest.TestCase):
         self.assertEqual('gpt-5.5', resolved['openai_model'])
         self.assertTrue(calls)
         self.assertTrue(all(call[2] == 'http://127.0.0.1:7898' for call in calls))
+
+    def test_normalize_openai_base_url_sends_codex_compatible_headers(self) -> None:
+        seen_headers: list[dict[str, str]] = []
+
+        def fake_get(
+            url: str,
+            headers: dict[str, str],
+            timeout: float,
+            upstream_proxy_url: str = '',
+        ) -> tuple[int, str]:
+            seen_headers.append(dict(headers))
+            return 200, '{"data":[{"id":"gpt-5.5"}]}'
+
+        with mock.patch.object(
+            token_pool_settings,
+            '_http_get_with_optional_explicit_proxy',
+            side_effect=fake_get,
+        ):
+            resolved = token_pool_settings.normalize_openai_base_url(
+                'https://provider.example.test',
+                'sk-test',
+            )
+
+        self.assertEqual('https://provider.example.test', resolved)
+        self.assertTrue(seen_headers)
+        self.assertEqual('codex_exec', seen_headers[0].get('originator'))
+        self.assertTrue(seen_headers[0].get('User-Agent', '').startswith('codex_exec/'))
+
+    def test_fetch_openai_compatible_models_sends_codex_compatible_headers(self) -> None:
+        seen_headers: list[dict[str, str]] = []
+
+        def fake_get(
+            url: str,
+            headers: dict[str, str],
+            timeout: float,
+            upstream_proxy_url: str = '',
+        ) -> tuple[int, str]:
+            seen_headers.append(dict(headers))
+            return 200, '{"data":[{"id":"gpt-5.5"}]}'
+
+        with mock.patch.object(
+            token_pool_settings,
+            '_http_get_with_optional_explicit_proxy',
+            side_effect=fake_get,
+        ):
+            models = token_pool_settings.fetch_openai_compatible_models(
+                'https://provider.example.test/v1',
+                'sk-test',
+            )
+
+        self.assertEqual(['gpt-5.5'], models)
+        self.assertTrue(seen_headers)
+        self.assertEqual('codex_exec', seen_headers[0].get('originator'))
+        self.assertTrue(seen_headers[0].get('User-Agent', '').startswith('codex_exec/'))
 

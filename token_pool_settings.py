@@ -34,6 +34,8 @@ VALID_BACKEND_MODES = {
     BACKEND_MODE_OPENAI_COMPATIBLE,
 }
 MODEL_METADATA_SOURCE_SLUG = 'gpt-5.5'
+OPENAI_COMPATIBLE_CODEX_USER_AGENT = 'codex_exec/0.142.5'
+OPENAI_COMPATIBLE_CODEX_ORIGINATOR = 'codex_exec'
 
 # Module-level proxy preference set by apply_openai_preset / resolve config.
 # Values: 'direct' or 'proxy'. Default to direct so presets are deterministic.
@@ -85,6 +87,16 @@ def normalize_string_map(raw: object) -> dict[str, str]:
 
 def _normalize_string_map(raw: object) -> dict[str, str]:
     return normalize_string_map(raw)
+
+
+def _openai_compatible_codex_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = {
+        'User-Agent': OPENAI_COMPATIBLE_CODEX_USER_AGENT,
+        'originator': OPENAI_COMPATIBLE_CODEX_ORIGINATOR,
+    }
+    if extra:
+        headers.update(extra)
+    return headers
 
 
 def _normalize_openai_preset_id(raw_id: object, fallback: str = DEFAULT_OPENAI_PRESET_ID) -> str:
@@ -1035,11 +1047,10 @@ def normalize_openai_base_url(
         try:
             status, _body = _http_get_with_optional_explicit_proxy(
                 f'{candidate}/models',
-                headers={
+                headers=_openai_compatible_codex_headers({
                     'Accept': 'application/json',
                     'Authorization': f'Bearer {clean_api_key}',
-                    'User-Agent': 'codex-session-manager-openai-compatible',
-                },
+                }),
                 timeout=timeout_seconds,
                 upstream_proxy_url=upstream_proxy_url,
             )
@@ -1066,6 +1077,23 @@ def _looks_like_codex_client_required_error(status: int, body: str) -> bool:
         return False
     lower = body.lower()
     return 'codex_access_restricted' in lower or 'codex cli' in lower or 'codex客户端' in body
+
+
+def _looks_like_supported_endpoint_runtime_error(status: int, body: str) -> bool:
+    if status not in (402, 403, 429):
+        return False
+    lower = body.lower()
+    return any(
+        keyword in lower
+        for keyword in (
+            'insufficient_user_quota',
+            'insufficient quota',
+            'rate_limit',
+            'rate limit',
+            'quota',
+            '额度不足',
+        )
+    )
 
 
 def detect_openai_compatible_protocol(
@@ -1103,12 +1131,11 @@ def detect_openai_compatible_protocol(
     try:
         responses_status, responses_body = _http_post_json_with_optional_explicit_proxy(
             f'{clean_base_url}/responses',
-            headers={
+            headers=_openai_compatible_codex_headers({
                 'Accept': 'application/json',
                 'Authorization': f'Bearer {clean_api_key}',
                 'Content-Type': 'application/json',
-                'User-Agent': 'codex-session-manager-openai-compatible',
-            },
+            }),
             payload=json.dumps({
                 'model': clean_model,
                 'input': [{'role': 'user', 'content': 'ping'}],
@@ -1127,12 +1154,11 @@ def detect_openai_compatible_protocol(
         try:
             stream_status, stream_body = _http_post_json_with_optional_explicit_proxy(
                 f'{clean_base_url}/responses',
-                headers={
+                headers=_openai_compatible_codex_headers({
                     'Accept': 'text/event-stream',
                     'Authorization': f'Bearer {clean_api_key}',
                     'Content-Type': 'application/json',
-                    'User-Agent': 'codex-session-manager-openai-compatible',
-                },
+                }),
                 payload=json.dumps({
                     'model': clean_model,
                     'input': [{'role': 'user', 'content': 'ping'}],
@@ -1158,12 +1184,11 @@ def detect_openai_compatible_protocol(
         try:
             stream_status, stream_body = _http_post_json_with_optional_explicit_proxy(
                 f'{clean_base_url}/responses',
-                headers={
+                headers=_openai_compatible_codex_headers({
                     'Accept': 'application/json',
                     'Authorization': f'Bearer {clean_api_key}',
                     'Content-Type': 'application/json',
-                    'User-Agent': 'codex-session-manager-openai-compatible',
-                },
+                }),
                 payload=json.dumps({
                     'model': clean_model,
                     'input': 'ping',
@@ -1190,12 +1215,11 @@ def detect_openai_compatible_protocol(
     # --- Probe /chat/completions ---
     chat_status, chat_body = _http_post_json_with_optional_explicit_proxy(
         f'{clean_base_url}/chat/completions',
-        headers={
+        headers=_openai_compatible_codex_headers({
             'Accept': 'application/json',
             'Authorization': f'Bearer {clean_api_key}',
             'Content-Type': 'application/json',
-            'User-Agent': 'codex-session-manager-openai-compatible',
-        },
+        }),
         payload=json.dumps({
             'model': clean_model,
             'messages': [{'role': 'user', 'content': 'ping'}],
@@ -1206,6 +1230,8 @@ def detect_openai_compatible_protocol(
         upstream_proxy_url=upstream_proxy_url,
     )
     if 200 <= chat_status < 300 and _body_looks_like_json(chat_body):
+        return OPENAI_PROTOCOL_CHAT_COMPLETIONS, clean_base_url
+    if _looks_like_supported_endpoint_runtime_error(chat_status, chat_body):
         return OPENAI_PROTOCOL_CHAT_COMPLETIONS, clean_base_url
     if chat_status not in _FALLBACK_CODES:
         detail = chat_body.strip()
@@ -1320,11 +1346,10 @@ def fetch_openai_compatible_models(
     try:
         status, body = _http_get_with_optional_explicit_proxy(
             f'{clean_base_url}/models',
-            headers={
+            headers=_openai_compatible_codex_headers({
                 'Accept': 'application/json',
                 'Authorization': f'Bearer {clean_api_key}',
-                'User-Agent': 'codex-session-manager-openai-compatible',
-            },
+            }),
             timeout=timeout_seconds,
             upstream_proxy_url=upstream_proxy_url,
         )
