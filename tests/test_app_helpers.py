@@ -702,14 +702,14 @@ class AppHelperTests(unittest.TestCase):
 
             self.assertEqual("[features]\n", config_path.read_text(encoding="utf-8"))
 
-    def test_openai_compatible_backend_launch_args_disable_image_generation_temporarily(self) -> None:
+    def test_openai_compatible_backend_launch_args_keep_image_input_enabled(self) -> None:
         args = app.build_openai_compatible_provider_override_args(
             model="gpt-5.5",
             base_url="https://api.openai.com/v1",
         )
 
         self.assertIn("-c", args)
-        self.assertIn("features.image_generation=false", args)
+        self.assertNotIn("features.image_generation=false", args)
 
     def test_save_openai_compatible_backend_settings_updates_named_active_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -3655,7 +3655,7 @@ class BackendOverrideArgsTests(unittest.TestCase):
         self.assertIn('model_provider="openai_compatible"', rendered)
         self.assertIn('model_providers.openai_compatible.base_url="https://api.openai.com/v1"', rendered)
         self.assertIn('model_providers.openai_compatible.env_key="CODEX_OPENAI_COMPATIBLE_API_KEY"', rendered)
-        self.assertIn("features.image_generation=false", args)
+        self.assertNotIn("features.image_generation=false", args)
 
     def test_build_backend_override_args_points_proxy_preference_to_local_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

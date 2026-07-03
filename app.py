@@ -657,8 +657,6 @@ def build_openai_compatible_provider_override_args(
         f'model_providers.{clean_provider}.requires_openai_auth=false',
         "-c",
         f'model_providers.{clean_provider}.supports_websockets=false',
-        "-c",
-        "features.image_generation=false",
     ]
 
 
