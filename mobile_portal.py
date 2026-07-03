@@ -178,13 +178,12 @@ _CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
 
 def _patch_image_generation_for_preset(preset: dict[str, object]) -> None:
-    """Add/remove image_generation = false in ~/.codex/config.toml [features]."""
-    should_disable = bool(preset.get("disable_image_generation", False))
-    _patch_image_generation_disabled(should_disable)
+    """Deprecated: launch-time config overrides now handle image generation."""
+    return None
 
 
 def _patch_image_generation_for_backend_mode(backend_mode: str) -> None:
-    _patch_image_generation_disabled(backend_mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE)
+    return None
 
 
 def _patch_image_generation_disabled(should_disable: bool) -> None:
@@ -1277,6 +1276,8 @@ def build_openai_compatible_provider_override_args(
         f'model_providers.{clean_provider}.requires_openai_auth=false',
         "-c",
         f'model_providers.{clean_provider}.supports_websockets=false',
+        "-c",
+        "features.image_generation=false",
     ]
 
 

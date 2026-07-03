@@ -2153,7 +2153,7 @@ class PortalAccountSlotsTests(unittest.TestCase):
         self.assertEqual(["gpt-5.5", "gpt-5.4"], loaded["openai_models"])
         self.assertEqual("responses", loaded["openai_protocol"])
 
-    def test_update_backend_settings_disables_image_generation_for_openai_compatible(self) -> None:
+    def test_update_backend_settings_does_not_mutate_codex_config_for_openai_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = mobile_portal.PortalService("127.0.0.1", 8765, "token")
             backend_settings_path = Path(temp_dir) / "token_pool_settings.json"
@@ -2182,7 +2182,7 @@ class PortalAccountSlotsTests(unittest.TestCase):
                     openai_model="gpt-5.5",
                 )
 
-            self.assertIn("image_generation = false", config_path.read_text(encoding="utf-8"))
+            self.assertEqual("[features]\n", config_path.read_text(encoding="utf-8"))
 
     def test_update_backend_settings_can_save_named_openai_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3655,6 +3655,7 @@ class BackendOverrideArgsTests(unittest.TestCase):
         self.assertIn('model_provider="openai_compatible"', rendered)
         self.assertIn('model_providers.openai_compatible.base_url="https://api.openai.com/v1"', rendered)
         self.assertIn('model_providers.openai_compatible.env_key="CODEX_OPENAI_COMPATIBLE_API_KEY"', rendered)
+        self.assertIn("features.image_generation=false", args)
 
     def test_build_backend_override_args_points_proxy_preference_to_local_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

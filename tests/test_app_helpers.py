@@ -665,7 +665,7 @@ class AppHelperTests(unittest.TestCase):
         self.assertEqual(["gpt-5.5", "gpt-5.4"], reloaded["openai_models"])
         self.assertEqual("chat_completions", reloaded["openai_protocol"])
 
-    def test_save_openai_compatible_backend_settings_disables_image_generation(self) -> None:
+    def test_save_openai_compatible_backend_settings_does_not_mutate_codex_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = Path(temp_dir) / "token_pool_settings.json"
             token_dir = Path(temp_dir) / "tokens"
@@ -700,7 +700,16 @@ class AppHelperTests(unittest.TestCase):
                     model="gpt-5.5",
                 )
 
-            self.assertIn("image_generation = false", config_path.read_text(encoding="utf-8"))
+            self.assertEqual("[features]\n", config_path.read_text(encoding="utf-8"))
+
+    def test_openai_compatible_backend_launch_args_disable_image_generation_temporarily(self) -> None:
+        args = app.build_openai_compatible_provider_override_args(
+            model="gpt-5.5",
+            base_url="https://api.openai.com/v1",
+        )
+
+        self.assertIn("-c", args)
+        self.assertIn("features.image_generation=false", args)
 
     def test_save_openai_compatible_backend_settings_updates_named_active_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
