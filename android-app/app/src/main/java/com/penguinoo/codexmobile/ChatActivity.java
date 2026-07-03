@@ -1200,8 +1200,8 @@ public final class ChatActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onApply(String presetId) {
-                applyOpenAiBackendPreset(presetId);
+            public void onApply(String presetId, String presetName, String baseUrl, String apiKey, String model, String proxyPreference) {
+                applyOpenAiBackendPreset(presetId, presetName, baseUrl, apiKey, model, proxyPreference);
             }
         });
     }
@@ -1270,7 +1270,14 @@ public final class ChatActivity extends AppCompatActivity {
         });
     }
 
-    private void applyOpenAiBackendPreset(String presetId) {
+    private void applyOpenAiBackendPreset(
+            String presetId,
+            String presetName,
+            String baseUrl,
+            String apiKey,
+            String model,
+            String proxyPreference
+    ) {
         String normalizedPresetId = presetId == null ? "" : presetId.trim();
         if (normalizedPresetId.isEmpty()) {
             showBanner(getString(R.string.banner_select_openai_preset));
@@ -1279,7 +1286,7 @@ public final class ChatActivity extends AppCompatActivity {
         showBanner(getString(R.string.banner_loading_backend));
         executor.execute(() -> {
             try {
-                apiClient.applyBackendPreset(endpoint, normalizedPresetId);
+                apiClient.applyBackendPreset(endpoint, normalizedPresetId, presetName, baseUrl, apiKey, model, proxyPreference);
                 runOnUiThread(() -> {
                     showBanner(getString(R.string.banner_openai_preset_applied, normalizedPresetId));
                     showAccountsDialog();

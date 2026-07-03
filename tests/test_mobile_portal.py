@@ -2153,6 +2153,37 @@ class PortalAccountSlotsTests(unittest.TestCase):
         self.assertEqual(["gpt-5.5", "gpt-5.4"], loaded["openai_models"])
         self.assertEqual("responses", loaded["openai_protocol"])
 
+    def test_update_backend_settings_disables_image_generation_for_openai_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = mobile_portal.PortalService("127.0.0.1", 8765, "token")
+            backend_settings_path = Path(temp_dir) / "token_pool_settings.json"
+            token_dir = Path(temp_dir) / "tokens"
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text("[features]\n", encoding="utf-8")
+            service.backend_settings_file = backend_settings_path
+
+            with mock.patch.object(mobile_portal, "_CODEX_CONFIG_PATH", config_path), mock.patch.object(
+                token_pool_settings,
+                "resolve_openai_compatible_backend_config",
+                return_value={
+                    "openai_base_url": "https://api.openai.com/v1",
+                    "openai_api_key": "sk-test",
+                    "openai_model": "gpt-5.5",
+                    "openai_models": ["gpt-5.5"],
+                    "openai_protocol": "responses",
+                },
+            ):
+                service.update_backend_settings(
+                    backend_mode=token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                    token_dir=str(token_dir),
+                    proxy_port=8456,
+                    openai_base_url="https://api.openai.com/v1",
+                    openai_api_key="sk-test",
+                    openai_model="gpt-5.5",
+                )
+
+            self.assertIn("image_generation = false", config_path.read_text(encoding="utf-8"))
+
     def test_update_backend_settings_can_save_named_openai_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = mobile_portal.PortalService("127.0.0.1", 8765, "token")
@@ -2437,6 +2468,119 @@ class PortalAccountSlotsTests(unittest.TestCase):
         self.assertEqual("private-provider", applied["active_openai_preset_id"])
         self.assertEqual("private-model", applied["openai_model"])
         self.assertEqual("responses", applied["openai_protocol"])
+
+    def test_apply_openai_backend_preset_persists_skip_validation_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = mobile_portal.PortalService("127.0.0.1", 8765, "token")
+            backend_settings_path = Path(temp_dir) / "token_pool_settings.json"
+            service.backend_settings_file = backend_settings_path
+            token_pool_settings.save_backend_settings(
+                token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                settings_file=backend_settings_path,
+                token_dir=Path(temp_dir) / "tokens",
+                proxy_port=8456,
+                proxy_api_key="pool-api-key",
+                openai_base_url="https://default.example/v1",
+                openai_api_key="sk-default",
+                openai_model="default-model",
+                openai_models=["default-model"],
+                openai_protocol="responses",
+            )
+            token_pool_settings.save_openai_preset(
+                settings_file=backend_settings_path,
+                preset_id="private-provider",
+                name="Private Provider",
+                openai_base_url="https://private.example/v1",
+                openai_api_key="sk-private",
+                openai_model="private-model",
+                openai_models=["private-model", "private-alt"],
+                openai_protocol="responses",
+                skip_validation=True,
+                set_active=False,
+            )
+
+            with mock.patch.object(token_pool_settings, "resolve_openai_compatible_backend_config") as resolve_backend, \
+                 mock.patch.object(mobile_portal, "stop_token_pool_backend"), \
+                 mock.patch.object(mobile_portal, "start_openai_compatible_backend", return_value={"status": "ok"}):
+                applied = service.apply_openai_backend_preset(
+                    "private-provider",
+                    preset_name="Renamed Private",
+                    openai_model="private-alt",
+                    openai_protocol="chat_completions",
+                    proxy_preference="proxy",
+                )
+
+            loaded = token_pool_settings.load_backend_settings(backend_settings_path)
+
+        resolve_backend.assert_not_called()
+        self.assertEqual("private-provider", applied["active_openai_preset_id"])
+        self.assertEqual("private-alt", applied["openai_model"])
+        self.assertEqual("chat_completions", applied["openai_protocol"])
+        preset = next(item for item in loaded["openai_presets"] if item["id"] == "private-provider")
+        self.assertEqual("Renamed Private", preset["name"])
+        self.assertEqual("private-alt", preset["openai_model"])
+        self.assertEqual("chat_completions", preset["openai_protocol"])
+        self.assertEqual("proxy", preset["proxy_preference"])
+        self.assertTrue(preset["skip_validation"])
+
+    def test_update_backend_settings_skips_validation_for_skip_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = mobile_portal.PortalService("127.0.0.1", 8765, "token")
+            backend_settings_path = Path(temp_dir) / "token_pool_settings.json"
+            token_dir = Path(temp_dir) / "tokens"
+            service.backend_settings_file = backend_settings_path
+            token_pool_settings.save_backend_settings(
+                token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                settings_file=backend_settings_path,
+                token_dir=token_dir,
+                proxy_port=8456,
+                proxy_api_key="pool-api-key",
+                openai_base_url="https://default.example/v1",
+                openai_api_key="sk-default",
+                openai_model="default-model",
+                openai_models=["default-model"],
+                openai_protocol="responses",
+            )
+            token_pool_settings.save_openai_preset(
+                settings_file=backend_settings_path,
+                preset_id="private-provider",
+                name="Private Provider",
+                openai_base_url="https://private.example/v1",
+                openai_api_key="sk-private",
+                openai_model="private-model",
+                openai_models=["private-model"],
+                openai_protocol="responses",
+                skip_validation=True,
+                set_active=False,
+            )
+
+            with mock.patch.object(token_pool_settings, "resolve_openai_compatible_backend_config") as resolve_backend, \
+                 mock.patch.object(mobile_portal, "stop_token_pool_backend"), \
+                 mock.patch.object(mobile_portal, "start_openai_compatible_backend", return_value={"status": "ok"}):
+                updated = service.update_backend_settings(
+                    backend_mode=token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                    token_dir=str(token_dir),
+                    proxy_port=8456,
+                    openai_base_url="https://private.example/v1",
+                    openai_api_key="sk-private",
+                    openai_model="private-alt",
+                    preset_id="private-provider",
+                    preset_name="Private Provider",
+                    openai_protocol="chat_completions",
+                    proxy_preference="proxy",
+                )
+
+            loaded = token_pool_settings.load_backend_settings(backend_settings_path)
+
+        resolve_backend.assert_not_called()
+        self.assertEqual("private-provider", updated["active_openai_preset_id"])
+        self.assertEqual("private-alt", loaded["openai_model"])
+        self.assertEqual("chat_completions", loaded["openai_protocol"])
+        preset = next(item for item in loaded["openai_presets"] if item["id"] == "private-provider")
+        self.assertEqual("private-alt", preset["openai_model"])
+        self.assertIn("private-alt", preset["openai_models"])
+        self.assertEqual("proxy", preset["proxy_preference"])
+        self.assertTrue(preset["skip_validation"])
 
     def test_update_backend_settings_fetches_openai_models_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

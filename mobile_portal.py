@@ -180,24 +180,39 @@ _CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 def _patch_image_generation_for_preset(preset: dict[str, object]) -> None:
     """Add/remove image_generation = false in ~/.codex/config.toml [features]."""
     should_disable = bool(preset.get("disable_image_generation", False))
+    _patch_image_generation_disabled(should_disable)
+
+
+def _patch_image_generation_for_backend_mode(backend_mode: str) -> None:
+    _patch_image_generation_disabled(backend_mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE)
+
+
+def _patch_image_generation_disabled(should_disable: bool) -> None:
     try:
         if not _CODEX_CONFIG_PATH.is_file():
             return
         text = _CODEX_CONFIG_PATH.read_text(encoding="utf-8-sig")
         lines = text.splitlines(keepends=True)
-        has_line = any("image_generation" in l for l in lines)
-        if should_disable and not has_line:
+        has_line = any(l.strip().startswith("image_generation") for l in lines)
+        if should_disable:
             new_lines = []
             added = False
             for l in lines:
+                if l.strip().startswith("image_generation"):
+                    new_lines.append("image_generation = false\n")
+                    added = True
+                    continue
                 new_lines.append(l)
                 if not added and l.strip() == "[features]":
                     new_lines.append("image_generation = false\n")
                     added = True
             if added:
                 _CODEX_CONFIG_PATH.write_text("".join(new_lines), encoding="utf-8")
+            else:
+                suffix = "" if not text or text.endswith(("\n", "\r")) else "\n"
+                _CODEX_CONFIG_PATH.write_text(f"{text}{suffix}\n[features]\nimage_generation = false\n", encoding="utf-8")
         elif not should_disable and has_line:
-            new_lines = [l for l in lines if "image_generation" not in l]
+            new_lines = [l for l in lines if not l.strip().startswith("image_generation")]
             _CODEX_CONFIG_PATH.write_text("".join(new_lines), encoding="utf-8")
     except OSError:
         pass
@@ -1795,6 +1810,7 @@ def ensure_backend_proxy_ready(
         )
         return
     if mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
+        _patch_image_generation_for_backend_mode(token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE)
         token_pool_settings.ensure_openai_compatible_model_metadata(
             unique_model_ids(settings.get("openai_models", [])) or [str(settings.get("openai_model", "")).strip()]
         )
@@ -1853,6 +1869,38 @@ def unique_model_ids(models: object) -> list[str]:
         seen.add(clean_model)
         unique.append(clean_model)
     return unique
+
+
+def _find_openai_preset(settings: dict[str, object], preset_id: str) -> dict[str, object]:
+    clean_id = preset_id.strip()
+    if not clean_id:
+        return {}
+    for item in settings.get("openai_presets", []) or []:
+        if isinstance(item, dict) and str(item.get("id", "")).strip() == clean_id:
+            return item
+    return {}
+
+
+def _merge_openai_models(models: object, extras: object, selected_model: str) -> list[str]:
+    merged = unique_model_ids(models)
+    clean_selected = selected_model.strip()
+    if clean_selected and clean_selected not in merged:
+        merged.insert(0, clean_selected)
+    for item in extras or []:
+        extra = str(item).strip()
+        if extra and extra not in merged:
+            merged.append(extra)
+    return merged
+
+
+def _resolved_manual_openai_protocol(protocol_override: str, fallback: str) -> str:
+    clean_override = protocol_override.strip()
+    if clean_override and clean_override in token_pool_settings.VALID_OPENAI_PROTOCOLS:
+        return clean_override
+    clean_fallback = fallback.strip()
+    if clean_fallback in token_pool_settings.VALID_OPENAI_PROTOCOLS:
+        return clean_fallback
+    return ""
 
 
 def _normalize_process_match_text(value: object) -> str:
@@ -3738,6 +3786,10 @@ class PortalService:
         preset_models: list[str] | None = None
         preset_protocol = ""
         preset_upstream_proxy_url = ""
+        preset_skip_validation = False
+        preset_installation_id = ""
+        preset_claude_env: object = {}
+        preset_disable_image_generation = False
         clean_preset_id = preset_id.strip()
         if clean_preset_id:
             raw_presets = current.get("openai_presets", [])
@@ -3754,6 +3806,10 @@ class PortalService:
                             preset_models = [str(model).strip() for model in raw_preset_models if str(model).strip()]
                         preset_protocol = str(item.get("openai_protocol", "")).strip()
                         preset_upstream_proxy_url = str(item.get("upstream_proxy_url", "")).strip()
+                        preset_skip_validation = bool(item.get("skip_validation", False))
+                        preset_installation_id = str(item.get("installation_id", "")).strip()
+                        preset_claude_env = item.get("claude_env", {})
+                        preset_disable_image_generation = bool(item.get("disable_image_generation", False))
                         break
         resolved_openai_base_url = (
             openai_base_url.strip()
@@ -3774,6 +3830,7 @@ class PortalService:
             backend_mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE
             and resolved_openai_base_url
             and resolved_openai_api_key
+            and not preset_skip_validation
         ):
             if resolved_upstream_proxy_url:
                 resolved = token_pool_settings.resolve_openai_compatible_backend_config(
@@ -3793,6 +3850,16 @@ class PortalService:
             resolved_openai_model = str(resolved.get("openai_model", resolved_openai_model))
             resolved_openai_models = resolved.get("openai_models", resolved_openai_models)
             resolved_openai_protocol = str(resolved.get("openai_protocol", resolved_openai_protocol))
+        elif backend_mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE and preset_skip_validation:
+            resolved_openai_models = _merge_openai_models(
+                resolved_openai_models,
+                resolved_manual_extras,
+                resolved_openai_model,
+            )
+            resolved_openai_protocol = _resolved_manual_openai_protocol(
+                resolved_openai_protocol,
+                preset_protocol or str(current.get("openai_protocol", "")),
+            )
         updated = token_pool_settings.save_backend_settings(
             backend_mode=backend_mode,
             settings_file=self.backend_settings_file,
@@ -3820,9 +3887,14 @@ class PortalService:
                 openai_manual_extra_models=updated.get("openai_manual_extra_models", []),
                 proxy_preference=proxy_preference,
                 upstream_proxy_url=resolved_upstream_proxy_url,
+                skip_validation=preset_skip_validation,
+                installation_id=preset_installation_id,
+                claude_env=preset_claude_env,
+                disable_image_generation=preset_disable_image_generation,
                 set_active=True,
                 create_new=create_new_preset,
             )
+        _patch_image_generation_for_backend_mode(str(updated.get("backend_mode", backend_mode)))
         self.jobs.backend_settings_file = self.backend_settings_file
         updated_backend_mode = str(updated.get("backend_mode", token_pool_settings.BACKEND_MODE_CODEX_AUTH))
         if (
@@ -3852,7 +3924,71 @@ class PortalService:
             **self.backend_status_payload(),
         }
 
-    def apply_openai_backend_preset(self, preset_id: str) -> dict[str, object]:
+    def apply_openai_backend_preset(
+        self,
+        preset_id: str,
+        *,
+        preset_name: str | None = None,
+        openai_base_url: str | None = None,
+        openai_api_key: str | None = None,
+        openai_model: str | None = None,
+        openai_protocol: str | None = None,
+        proxy_preference: str | None = None,
+        upstream_proxy_url: str | None = None,
+    ) -> dict[str, object]:
+        existing = token_pool_settings.load_backend_settings(self.backend_settings_file)
+        existing_preset = _find_openai_preset(existing, preset_id)
+        if bool(existing_preset.get("skip_validation", False)):
+            selected_model = (
+                openai_model.strip()
+                if openai_model is not None
+                else str(existing_preset.get("openai_model", "")).strip()
+            )
+            token_pool_settings.save_openai_preset(
+                settings_file=self.backend_settings_file,
+                preset_id=preset_id.strip(),
+                name=(
+                    preset_name.strip()
+                    if preset_name is not None and preset_name.strip()
+                    else str(existing_preset.get("name", preset_id)).strip() or preset_id.strip()
+                ),
+                openai_base_url=(
+                    openai_base_url.strip()
+                    if openai_base_url is not None and openai_base_url.strip()
+                    else str(existing_preset.get("openai_base_url", token_pool_settings.DEFAULT_OPENAI_BASE_URL))
+                ),
+                openai_api_key=(
+                    openai_api_key.strip()
+                    if openai_api_key is not None and openai_api_key.strip()
+                    else str(existing_preset.get("openai_api_key", ""))
+                ),
+                openai_model=selected_model,
+                openai_models=_merge_openai_models(
+                    existing_preset.get("openai_models", []),
+                    existing_preset.get("openai_manual_extra_models", []),
+                    selected_model,
+                ),
+                openai_protocol=_resolved_manual_openai_protocol(
+                    openai_protocol or "",
+                    str(existing_preset.get("openai_protocol", "")),
+                ),
+                openai_manual_extra_models=existing_preset.get("openai_manual_extra_models", []),
+                proxy_preference=(
+                    proxy_preference.strip()
+                    if proxy_preference is not None and proxy_preference.strip()
+                    else str(existing_preset.get("proxy_preference", "direct"))
+                ),
+                upstream_proxy_url=(
+                    upstream_proxy_url.strip()
+                    if upstream_proxy_url is not None and upstream_proxy_url.strip()
+                    else str(existing_preset.get("upstream_proxy_url", ""))
+                ),
+                skip_validation=True,
+                installation_id=str(existing_preset.get("installation_id", "")),
+                claude_env=existing_preset.get("claude_env", {}),
+                disable_image_generation=bool(existing_preset.get("disable_image_generation", False)),
+                set_active=False,
+            )
         applied = token_pool_settings.apply_openai_preset(preset_id, settings_file=self.backend_settings_file)
         applied_preset = next((item for item in applied.get("openai_presets", []) if isinstance(item, dict) and str(item.get("id", "")).strip() == preset_id.strip()), {})
         if bool(applied_preset.get("skip_validation", False)):
@@ -3889,8 +4025,8 @@ class PortalService:
             openai_models=updated.get("openai_models", []),
             openai_protocol=str(updated.get("openai_protocol", "")),
             openai_manual_extra_models=updated.get("openai_manual_extra_models", []),
-            proxy_preference=str(updated.get("proxy_preference", "direct")),
-            upstream_proxy_url=str(updated.get("upstream_proxy_url", "")),
+            proxy_preference=str(preset.get("proxy_preference", applied_preset.get("proxy_preference", "direct"))),
+            upstream_proxy_url=str(preset.get("upstream_proxy_url", applied_preset.get("upstream_proxy_url", ""))),
             skip_validation=bool(applied_preset.get("skip_validation", False)),
             installation_id=str(applied_preset.get("installation_id", "")),
             claude_env=applied_preset.get("claude_env", {}),
@@ -3902,7 +4038,7 @@ class PortalService:
         active_preset = next((item for item in updated.get("openai_presets", []) if isinstance(item, dict) and str(item.get("id", "")).strip() == preset_id.strip()), {})
         _swap_installation_id_for_preset(active_preset)
         _patch_claude_settings_for_preset(active_preset)
-        _patch_image_generation_for_preset(active_preset)
+        _patch_image_generation_for_backend_mode(str(updated.get("backend_mode", "")))
         time.sleep(0.2)
         if openai_compatible_requires_local_proxy(updated):
             start_openai_compatible_backend(
@@ -3918,6 +4054,7 @@ class PortalService:
             str(previous.get("backend_mode", token_pool_settings.BACKEND_MODE_CODEX_AUTH)) == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE
             or str(updated.get("backend_mode", token_pool_settings.BACKEND_MODE_CODEX_AUTH)) == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE
         ):
+            _patch_image_generation_for_backend_mode(str(updated.get("backend_mode", "")))
             stop_token_pool_backend()
             time.sleep(0.2)
             if openai_compatible_requires_local_proxy(updated):
@@ -3940,6 +4077,7 @@ class PortalService:
 
     def restart_backend_proxy(self) -> dict[str, object]:
         settings = token_pool_settings.load_backend_settings(self.backend_settings_file)
+        _patch_image_generation_for_backend_mode(str(settings.get("backend_mode", "")))
         stop_token_pool_backend()
         time.sleep(0.2)
         if settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
@@ -4745,7 +4883,15 @@ INDEX_HTML = """<!doctype html>
     async function applyBackendPreset() {
       const presetId = document.getElementById("backendPresetSelect").value;
       if (!presetId) return setStatus("Select a backend preset first.");
-      state.bootstrap.backend = await api("/api/backend", { method: "POST", body: JSON.stringify({ preset_action: "apply", preset_id: presetId }) });
+      state.bootstrap.backend = await api("/api/backend", { method: "POST", body: JSON.stringify({
+        preset_action: "apply",
+        preset_id: presetId,
+        openai_base_url: document.getElementById("backendOpenAiBaseUrl").value,
+        openai_api_key: document.getElementById("backendOpenAiApiKey").value,
+        preset_name: document.getElementById("backendPresetName").value,
+        proxy_preference: document.getElementById("backendProxyPreference").value,
+        upstream_proxy_url: document.getElementById("backendUpstreamProxyUrl").value,
+      }) });
       renderBackendPanel();
       await refreshBootstrap();
       setStatus(`Backend preset applied: ${presetId}`);
@@ -5325,7 +5471,16 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 action = str(payload.get("preset_action", "")).strip()
                 if action == "apply":
-                    result = self.portal.apply_openai_backend_preset(str(payload.get("preset_id", "")))
+                    result = self.portal.apply_openai_backend_preset(
+                        str(payload.get("preset_id", "")),
+                        preset_name=str(payload.get("preset_name", "")),
+                        openai_base_url=str(payload.get("openai_base_url", "")),
+                        openai_api_key=str(payload.get("openai_api_key", "")),
+                        openai_model=str(payload.get("openai_model", "")),
+                        openai_protocol=str(payload.get("openai_protocol", "")),
+                        proxy_preference=str(payload.get("proxy_preference", "")),
+                        upstream_proxy_url=str(payload.get("upstream_proxy_url", "")),
+                    )
                 elif action == "delete":
                     result = self.portal.delete_openai_backend_preset(str(payload.get("preset_id", "")))
                 else:

@@ -35,7 +35,7 @@ public final class AccountCenterDialogSupport {
 
     public interface OpenAiConfigListener {
         void onSave(String baseUrl, String apiKey, String model, String presetId, String presetName, String proxyPreference);
-        void onApply(String presetId);
+        void onApply(String presetId, String presetName, String baseUrl, String apiKey, String model, String proxyPreference);
     }
 
     private enum ButtonTone {
@@ -371,7 +371,14 @@ public final class AccountCenterDialogSupport {
                     );
                 })
                 .setNeutralButton(R.string.action_apply_current_preset, (dialog, which) ->
-                        listener.onApply(selectedOpenAiPresetId(presetSpinner, presets)))
+                        listener.onApply(
+                                selectedOpenAiPresetId(presetSpinner, presets),
+                                valueOf(presetNameInput),
+                                valueOf(baseUrlInput),
+                                valueOf(apiKeyInput),
+                                valueOf(modelInput),
+                                proxyPreferenceSpinner.getSelectedItemPosition() == 1 ? "proxy" : "direct"
+                        ))
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();
     }

@@ -120,4 +120,24 @@ public final class BackendStatusPayloadParsingTest {
         assertEquals("apply", body.getString("preset_action"));
         assertEquals("day-60", body.getString("preset_id"));
     }
+
+    @Test
+    public void buildApplyBackendPresetBody_includesEditedOpenAiFields() throws Exception {
+        JSONObject body = PortalApiClient.buildApplyBackendPresetBody(
+                "day-60",
+                "Day 60",
+                "https://provider.example/v1",
+                "sk-test",
+                "claude-opus-4-8",
+                "proxy"
+        );
+
+        assertEquals("apply", body.getString("preset_action"));
+        assertEquals("day-60", body.getString("preset_id"));
+        assertEquals("Day 60", body.getString("preset_name"));
+        assertEquals("https://provider.example/v1", body.getString("openai_base_url"));
+        assertEquals("sk-test", body.getString("openai_api_key"));
+        assertEquals("claude-opus-4-8", body.getString("openai_model"));
+        assertEquals("proxy", body.getString("proxy_preference"));
+    }
 }

@@ -107,6 +107,23 @@ public final class PortalApiClient {
         return parseBackendStatus(json);
     }
 
+    public BackendStatusPayload applyBackendPreset(
+            PortalEndpoint endpoint,
+            String presetId,
+            String presetName,
+            String openaiBaseUrl,
+            String openaiApiKey,
+            String openaiModel,
+            String proxyPreference
+    ) throws IOException {
+        JSONObject json = postJson(
+                endpoint,
+                "/api/backend",
+                buildApplyBackendPresetBody(presetId, presetName, openaiBaseUrl, openaiApiKey, openaiModel, proxyPreference)
+        );
+        return parseBackendStatus(json);
+    }
+
     public PortalProxySettings fetchProxySettings(PortalEndpoint endpoint) throws IOException {
         JSONObject json = getJson(endpoint, "/api/proxy-settings");
         return parseProxySettings(json);
@@ -501,10 +518,26 @@ public final class PortalApiClient {
     }
 
     static JSONObject buildApplyBackendPresetBody(String presetId) throws IOException {
+        return buildApplyBackendPresetBody(presetId, "", "", "", "", "");
+    }
+
+    static JSONObject buildApplyBackendPresetBody(
+            String presetId,
+            String presetName,
+            String openaiBaseUrl,
+            String openaiApiKey,
+            String openaiModel,
+            String proxyPreference
+    ) throws IOException {
         JSONObject body = new JSONObject();
         try {
             body.put("preset_action", "apply");
             body.put("preset_id", presetId == null ? "" : presetId.trim());
+            body.put("preset_name", presetName == null ? "" : presetName.trim());
+            body.put("openai_base_url", openaiBaseUrl == null ? "" : openaiBaseUrl.trim());
+            body.put("openai_api_key", openaiApiKey == null ? "" : openaiApiKey.trim());
+            body.put("openai_model", openaiModel == null ? "" : openaiModel.trim());
+            body.put("proxy_preference", "proxy".equals(proxyPreference) ? "proxy" : "direct");
         } catch (JSONException exception) {
             throw new IOException("Failed to build backend preset request.", exception);
         }

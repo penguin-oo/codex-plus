@@ -795,8 +795,8 @@ public final class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onApply(String presetId) {
-                applyOpenAiBackendPreset(endpoint, presetId);
+            public void onApply(String presetId, String presetName, String baseUrl, String apiKey, String model, String proxyPreference) {
+                applyOpenAiBackendPreset(endpoint, presetId, presetName, baseUrl, apiKey, model, proxyPreference);
             }
         });
     }
@@ -868,7 +868,15 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void applyOpenAiBackendPreset(PortalEndpoint endpoint, String presetId) {
+    private void applyOpenAiBackendPreset(
+            PortalEndpoint endpoint,
+            String presetId,
+            String presetName,
+            String baseUrl,
+            String apiKey,
+            String model,
+            String proxyPreference
+    ) {
         String normalizedPresetId = presetId == null ? "" : presetId.trim();
         if (normalizedPresetId.isEmpty()) {
             showBanner(getString(R.string.banner_select_openai_preset));
@@ -877,7 +885,7 @@ public final class MainActivity extends AppCompatActivity {
         showBanner(getString(R.string.banner_loading_backend));
         executor.execute(() -> {
             try {
-                apiClient.applyBackendPreset(endpoint, normalizedPresetId);
+                apiClient.applyBackendPreset(endpoint, normalizedPresetId, presetName, baseUrl, apiKey, model, proxyPreference);
                 runOnUiThread(() -> {
                     showBanner(getString(R.string.banner_openai_preset_applied, normalizedPresetId));
                     loadBootstrap();
