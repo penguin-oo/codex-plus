@@ -354,8 +354,8 @@ def ensure_openai_compatible_model_metadata(
     if not isinstance(models, list):
         return False
 
-    existing_slugs = {
-        str(model.get('slug', '')).strip()
+    existing_by_slug = {
+        str(model.get('slug', '')).strip(): model
         for model in models
         if isinstance(model, dict) and str(model.get('slug', '')).strip()
     }
@@ -374,7 +374,16 @@ def ensure_openai_compatible_model_metadata(
 
     changed = False
     for model_id in clean_model_ids:
-        if model_id in existing_slugs:
+        existing = existing_by_slug.get(model_id)
+        if existing is not None:
+            modalities = [str(item).strip() for item in existing.get('input_modalities', []) if str(item).strip()]
+            updated_modalities = list(modalities)
+            for modality in ('text', 'image'):
+                if modality not in updated_modalities:
+                    updated_modalities.append(modality)
+            if updated_modalities != modalities:
+                existing['input_modalities'] = updated_modalities
+                changed = True
             continue
         cloned = json.loads(json.dumps(source, ensure_ascii=False))
         cloned['slug'] = model_id
@@ -383,8 +392,9 @@ def ensure_openai_compatible_model_metadata(
         cloned['visibility'] = 'list'
         cloned['supported_in_api'] = True
         cloned['priority'] = int(cloned.get('priority', 1000) or 1000) + 1000
+        cloned['input_modalities'] = ['text', 'image']
         models.append(cloned)
-        existing_slugs.add(model_id)
+        existing_by_slug[model_id] = cloned
         changed = True
     if not changed:
         return False

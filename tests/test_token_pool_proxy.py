@@ -95,7 +95,7 @@ class TokenPoolSettingsTests(unittest.TestCase):
                 {
                     'models': [
                         {'slug': 'gpt-5.5', 'display_name': 'GPT-5.5'},
-                        {'slug': 'mimo-v2.5-pro', 'display_name': 'Mimo'},
+                        {'slug': 'mimo-v2.5-pro', 'display_name': 'Mimo', 'input_modalities': ['text', 'image']},
                     ]
                 }
             ),
@@ -110,6 +110,32 @@ class TokenPoolSettingsTests(unittest.TestCase):
         self.assertFalse(changed)
         payload = json.loads(models_cache.read_text(encoding='utf-8'))
         self.assertEqual(2, len(payload['models']))
+
+    def test_ensure_openai_compatible_model_metadata_enables_image_input_for_existing_entries(self) -> None:
+        models_cache = self.codex_home / 'models_cache.json'
+        models_cache.write_text(
+            json.dumps(
+                {
+                    'models': [
+                        {
+                            'slug': 'gpt-5.5',
+                            'display_name': 'GPT-5.5',
+                            'input_modalities': ['text'],
+                        },
+                    ]
+                }
+            ),
+            encoding='utf-8',
+        )
+
+        changed = token_pool_settings.ensure_openai_compatible_model_metadata(
+            ['gpt-5.5'],
+            models_cache_file=models_cache,
+        )
+
+        self.assertTrue(changed)
+        payload = json.loads(models_cache.read_text(encoding='utf-8'))
+        self.assertEqual(['text', 'image'], payload['models'][0]['input_modalities'])
 
     def test_import_token_files_copies_multiple_json_files(self) -> None:
         source_dir = self.root / 'source'
