@@ -3198,15 +3198,11 @@ class SessionManagerApp:
         ttk.Label(openai_protocol_row, text="Protocol", width=16).pack(side=tk.LEFT)
         openai_protocol_box = ttk.Combobox(openai_protocol_row, textvariable=openai_protocol_var, state="readonly", values=("responses", "chat_completions"))
         openai_protocol_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        openai_image_generation_row = ttk.Frame(token_pool_frame)
-        openai_image_generation_row.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(openai_image_generation_row, text="Image output", width=16).pack(side=tk.LEFT)
         ttk.Checkbutton(
-            openai_image_generation_row,
+            openai_protocol_row,
             text="Disable image generation",
             variable=openai_disable_image_generation_var,
-        ).pack(side=tk.LEFT)
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(token_pool_frame, text="OpenAI status", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 0))
         ttk.Label(token_pool_frame, textvariable=openai_status_var, justify=tk.LEFT, wraplength=540).pack(anchor="w", pady=(4, 8))
