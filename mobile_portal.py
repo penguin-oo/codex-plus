@@ -178,40 +178,44 @@ _CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
 
 def _patch_image_generation_for_preset(preset: dict[str, object]) -> None:
-    """Deprecated: launch-time config overrides now handle image generation."""
-    return None
+    _patch_image_generation_disabled(bool(preset.get("disable_image_generation", False)))
 
 
 def _patch_image_generation_for_backend_mode(backend_mode: str) -> None:
-    return None
+    if backend_mode != token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
+        _patch_image_generation_disabled(False)
 
 
 def _patch_image_generation_disabled(should_disable: bool) -> None:
     try:
-        if not _CODEX_CONFIG_PATH.is_file():
+        if not _CODEX_CONFIG_PATH.exists():
+            if not should_disable:
+                return
+            _CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _CODEX_CONFIG_PATH.write_text("[features]\nimage_generation = false\n", encoding="utf-8")
             return
         text = _CODEX_CONFIG_PATH.read_text(encoding="utf-8-sig")
         lines = text.splitlines(keepends=True)
-        has_line = any(l.strip().startswith("image_generation") for l in lines)
+        has_line = any(line.strip().startswith("image_generation") for line in lines)
         if should_disable:
             new_lines = []
             added = False
-            for l in lines:
-                if l.strip().startswith("image_generation"):
-                    new_lines.append("image_generation = false\n")
-                    added = True
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("image_generation"):
                     continue
-                new_lines.append(l)
-                if not added and l.strip() == "[features]":
+                new_lines.append(line)
+                if not added and stripped == "[features]":
                     new_lines.append("image_generation = false\n")
                     added = True
-            if added:
-                _CODEX_CONFIG_PATH.write_text("".join(new_lines), encoding="utf-8")
-            else:
+            if not added:
                 suffix = "" if not text or text.endswith(("\n", "\r")) else "\n"
-                _CODEX_CONFIG_PATH.write_text(f"{text}{suffix}\n[features]\nimage_generation = false\n", encoding="utf-8")
+                new_lines = [f"{text}{suffix}", "[features]\n", "image_generation = false\n"]
+            new_text = "".join(new_lines)
+            if new_text != text:
+                _CODEX_CONFIG_PATH.write_text(new_text, encoding="utf-8")
         elif not should_disable and has_line:
-            new_lines = [l for l in lines if not l.strip().startswith("image_generation")]
+            new_lines = [line for line in lines if not line.strip().startswith("image_generation")]
             _CODEX_CONFIG_PATH.write_text("".join(new_lines), encoding="utf-8")
     except OSError:
         pass
@@ -489,6 +493,23 @@ def resolve_launch_model_for_backend(model: str, backend_settings: dict[str, obj
     return configured_model
 
 
+def ensure_openai_compatible_launch_model_metadata(backend_settings: dict[str, object], model: str) -> None:
+    if backend_settings.get("backend_mode") != token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
+        return
+    model_ids = unique_model_ids(backend_settings.get("openai_models", []))
+    clean_model = str(model).strip()
+    if clean_model:
+        model_ids = unique_model_ids([clean_model, *model_ids])
+    if not model_ids:
+        configured_model = str(backend_settings.get("openai_model", "")).strip()
+        if configured_model:
+            model_ids = [configured_model]
+    token_pool_settings.ensure_openai_compatible_model_metadata(
+        model_ids,
+        models_cache_file=token_pool_settings.DEFAULT_MODELS_CACHE_FILE,
+    )
+
+
 def build_resume_args(
     output_file: Path,
     session_id: str,
@@ -503,6 +524,7 @@ def build_resume_args(
     args = [CODEX_BIN, "exec", "--json", "-o", str(output_file), "--skip-git-repo-check"]
     backend_settings = token_pool_settings.load_backend_settings(backend_settings_file)
     resolved_model = resolve_launch_model_for_backend(model, backend_settings)
+    ensure_openai_compatible_launch_model_metadata(backend_settings, resolved_model)
     if resolved_model and resolved_model != "default":
         args.extend(["-m", resolved_model])
     if sandbox and sandbox != "default":
@@ -534,6 +556,7 @@ def build_new_chat_args(
     args = [CODEX_BIN, "exec", "--json", "-o", str(output_file)]
     backend_settings = token_pool_settings.load_backend_settings(backend_settings_file)
     resolved_model = resolve_launch_model_for_backend(model, backend_settings)
+    ensure_openai_compatible_launch_model_metadata(backend_settings, resolved_model)
     if resolved_model and resolved_model != "default":
         args.extend(["-m", resolved_model])
     if sandbox and sandbox != "default":
@@ -4037,7 +4060,7 @@ class PortalService:
         active_preset = next((item for item in updated.get("openai_presets", []) if isinstance(item, dict) and str(item.get("id", "")).strip() == preset_id.strip()), {})
         _swap_installation_id_for_preset(active_preset)
         _patch_claude_settings_for_preset(active_preset)
-        _patch_image_generation_for_backend_mode(str(updated.get("backend_mode", "")))
+        _patch_image_generation_for_preset(active_preset)
         time.sleep(0.2)
         if openai_compatible_requires_local_proxy(updated):
             start_openai_compatible_backend(

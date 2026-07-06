@@ -62,6 +62,11 @@ class CustomProviderProxyTranslationTests(unittest.TestCase):
         self.assertEqual("medium", payload["models"][0]["default_reasoning_level"])
         self.assertTrue(payload["models"][0]["supported_reasoning_levels"])
 
+    def test_build_models_payload_marks_compatible_models_as_image_input(self) -> None:
+        payload = custom_provider_proxy.build_models_payload(["gpt-5.5"])
+
+        self.assertEqual(["text", "image"], payload["models"][0]["input_modalities"])
+
     def test_translate_responses_request_to_chat_completions_includes_instructions_and_text(self) -> None:
         payload = {
             "model": "mimo-v2-pro",

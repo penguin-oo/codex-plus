@@ -343,40 +343,44 @@ _CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
 
 def _patch_image_generation_for_preset(preset: dict[str, object]) -> None:
-    """Deprecated: launch-time config overrides now handle image generation."""
-    return None
+    _patch_image_generation_disabled(bool(preset.get("disable_image_generation", False)))
 
 
 def _patch_image_generation_for_backend_mode(backend_mode: str) -> None:
-    return None
+    if backend_mode != token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
+        _patch_image_generation_disabled(False)
 
 
 def _patch_image_generation_disabled(should_disable: bool) -> None:
     try:
-        if not _CODEX_CONFIG_PATH.is_file():
+        if not _CODEX_CONFIG_PATH.exists():
+            if not should_disable:
+                return
+            _CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _CODEX_CONFIG_PATH.write_text("[features]\nimage_generation = false\n", encoding="utf-8")
             return
         text = _CODEX_CONFIG_PATH.read_text(encoding="utf-8-sig")
         lines = text.splitlines(keepends=True)
-        has_line = any(l.strip().startswith("image_generation") for l in lines)
+        has_line = any(line.strip().startswith("image_generation") for line in lines)
         if should_disable:
             new_lines = []
             added = False
-            for l in lines:
-                if l.strip().startswith("image_generation"):
-                    new_lines.append("image_generation = false\n")
-                    added = True
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("image_generation"):
                     continue
-                new_lines.append(l)
-                if not added and l.strip() == "[features]":
+                new_lines.append(line)
+                if not added and stripped == "[features]":
                     new_lines.append("image_generation = false\n")
                     added = True
-            if added:
-                _CODEX_CONFIG_PATH.write_text("".join(new_lines), encoding="utf-8")
-            else:
+            if not added:
                 suffix = "" if not text or text.endswith(("\n", "\r")) else "\n"
-                _CODEX_CONFIG_PATH.write_text(f"{text}{suffix}\n[features]\nimage_generation = false\n", encoding="utf-8")
+                new_lines = [f"{text}{suffix}", "[features]\n", "image_generation = false\n"]
+            new_text = "".join(new_lines)
+            if new_text != text:
+                _CODEX_CONFIG_PATH.write_text(new_text, encoding="utf-8")
         elif not should_disable and has_line:
-            new_lines = [l for l in lines if not l.strip().startswith("image_generation")]
+            new_lines = [line for line in lines if not line.strip().startswith("image_generation")]
             _CODEX_CONFIG_PATH.write_text("".join(new_lines), encoding="utf-8")
     except OSError:
         pass
@@ -727,6 +731,12 @@ def _merge_openai_models(models: object, extras: list[str], selected_model: str)
     return merged
 
 
+def _resolve_disable_image_generation(existing_preset: dict[str, object], override: bool | None) -> bool:
+    if override is None:
+        return bool(existing_preset.get("disable_image_generation", False))
+    return bool(override)
+
+
 def _resolved_manual_openai_protocol(protocol_override: str, fallback: str) -> str:
     clean_override = protocol_override.strip()
     if clean_override and clean_override in token_pool_settings.VALID_OPENAI_PROTOCOLS:
@@ -752,9 +762,11 @@ def save_openai_compatible_backend_settings(
     create_new_preset: bool = False,
     proxy_preference: str = "direct",
     protocol_override: str = "",
+    disable_image_generation: bool | None = None,
 ) -> dict[str, object]:
     existing = token_pool_settings.load_backend_settings(settings_file)
     existing_preset = _find_openai_preset(existing, preset_id) if preset_id.strip() and not create_new_preset else {}
+    resolved_disable_image_generation = _resolve_disable_image_generation(existing_preset, disable_image_generation)
     skip_validation = bool(existing_preset.get("skip_validation", False))
     if manual_extra_models is None:
         extra_source = existing_preset.get("openai_manual_extra_models", existing.get("openai_manual_extra_models", []))
@@ -818,7 +830,7 @@ def save_openai_compatible_backend_settings(
             skip_validation=bool(existing_preset.get("skip_validation", False)),
             installation_id=str(existing_preset.get("installation_id", "")),
             claude_env=existing_preset.get("claude_env", {}),
-            disable_image_generation=bool(existing_preset.get("disable_image_generation", False)),
+            disable_image_generation=resolved_disable_image_generation,
             set_active=True,
             create_new=create_new_preset,
         )
@@ -838,9 +850,11 @@ def save_openai_compatible_preset_settings(
     create_new_preset: bool = False,
     proxy_preference: str = "direct",
     protocol_override: str = "",
+    disable_image_generation: bool | None = None,
 ) -> dict[str, object]:
     existing = token_pool_settings.load_backend_settings(settings_file)
     existing_preset = _find_openai_preset(existing, preset_id) if preset_id.strip() and not create_new_preset else {}
+    resolved_disable_image_generation = _resolve_disable_image_generation(existing_preset, disable_image_generation)
     skip_validation = bool(existing_preset.get("skip_validation", False))
     if manual_extra_models is None:
         extra_source = existing_preset.get("openai_manual_extra_models", existing.get("openai_manual_extra_models", []))
@@ -901,7 +915,7 @@ def save_openai_compatible_preset_settings(
         skip_validation=bool(existing_preset.get("skip_validation", False)),
         installation_id=str(existing_preset.get("installation_id", "")),
         claude_env=existing_preset.get("claude_env", {}),
-        disable_image_generation=bool(existing_preset.get("disable_image_generation", False)),
+        disable_image_generation=resolved_disable_image_generation,
         set_active=True,
         create_new=create_new_preset,
     )
@@ -2361,11 +2375,29 @@ class SessionManagerApp:
         if allowed_models:
             return allowed_models[0]
         return configured_model or DEFAULT_PRIMARY_MODEL
+
+    def _ensure_openai_compatible_launch_model_metadata(self, settings: dict[str, object], model: str) -> None:
+        if settings.get("backend_mode") != token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
+            return
+        model_ids = unique_model_ids(settings.get("openai_models", []))
+        clean_model = str(model).strip()
+        if clean_model:
+            model_ids = unique_model_ids([clean_model, *model_ids])
+        if not model_ids:
+            configured_model = str(settings.get("openai_model", "")).strip()
+            if configured_model:
+                model_ids = [configured_model]
+        token_pool_settings.ensure_openai_compatible_model_metadata(
+            model_ids,
+            models_cache_file=token_pool_settings.DEFAULT_MODELS_CACHE_FILE,
+        )
+
     def _build_codex_resume_args(self, item: SessionItem) -> list[str]:
         args: list[str] = ["codex.cmd", "resume", item.session_id]
         args.extend(self._build_codex_override_args())
         if self._is_openai_compatible_backend_enabled():
             backend_model = self._resolve_openai_compatible_launch_model(self._selected_launch_model())
+            self._ensure_openai_compatible_launch_model_metadata(self._token_pool_settings(), backend_model)
             args.extend(["-m", backend_model])
         else:
             backend_model = item.model.strip() or self._configured_backend_model() or DEFAULT_PRIMARY_MODEL
@@ -2378,6 +2410,7 @@ class SessionManagerApp:
         selected_model = self.model_var.get().strip()
         if self._is_openai_compatible_backend_enabled():
             backend_model = self._resolve_openai_compatible_launch_model(self._selected_launch_model())
+            self._ensure_openai_compatible_launch_model_metadata(self._token_pool_settings(), backend_model)
             args.extend(["-m", backend_model])
         else:
             backend_model = selected_model if selected_model and selected_model != "default" else self._configured_backend_model() or DEFAULT_PRIMARY_MODEL
@@ -2714,9 +2747,11 @@ class SessionManagerApp:
         openai_model: str | None = None,
         openai_protocol: str | None = None,
         proxy_preference: str | None = None,
+        disable_image_generation: bool | None = None,
     ) -> dict[str, object]:
         existing = token_pool_settings.load_backend_settings(settings_file)
         existing_preset = _find_openai_preset(existing, preset_id)
+        resolved_disable_image_generation = _resolve_disable_image_generation(existing_preset, disable_image_generation)
         if bool(existing_preset.get("skip_validation", False)):
             selected_model = (
                 openai_model.strip()
@@ -2761,7 +2796,7 @@ class SessionManagerApp:
                 skip_validation=True,
                 installation_id=str(existing_preset.get("installation_id", "")),
                 claude_env=existing_preset.get("claude_env", {}),
-                disable_image_generation=bool(existing_preset.get("disable_image_generation", False)),
+                disable_image_generation=resolved_disable_image_generation,
                 set_active=False,
             )
         applied = token_pool_settings.apply_openai_preset(preset_id, settings_file=settings_file)
@@ -2805,14 +2840,14 @@ class SessionManagerApp:
             skip_validation=bool(applied_preset.get("skip_validation", False)),
             installation_id=str(applied_preset.get("installation_id", "")),
             claude_env=applied_preset.get("claude_env", {}),
-            disable_image_generation=bool(applied_preset.get("disable_image_generation", False)),
+            disable_image_generation=_resolve_disable_image_generation(applied_preset, disable_image_generation),
             set_active=True,
         )
         self.backend_settings = updated
         active_preset = next((item for item in updated.get("openai_presets", []) if isinstance(item, dict) and str(item.get("id", "")).strip() == preset_id.strip()), {})
         _swap_installation_id_for_preset(active_preset)
         _patch_claude_settings_for_preset(active_preset)
-        _patch_image_generation_for_backend_mode(str(updated.get("backend_mode", "")))
+        _patch_image_generation_for_preset(active_preset)
         self._stop_token_pool_proxy()
         time.sleep(0.2)
         # Only start proxy if protocol translation is needed
@@ -3092,6 +3127,7 @@ class SessionManagerApp:
         openai_preset_name_var = tk.StringVar(value="")
         openai_proxy_preference_var = tk.StringVar(value="direct")
         openai_protocol_var = tk.StringVar(value="responses")
+        openai_disable_image_generation_var = tk.BooleanVar(value=False)
         openai_status_var = tk.StringVar(value="")
 
         token_pool_frame = ttk.LabelFrame(container, text="Backend", padding=10)
@@ -3163,6 +3199,15 @@ class SessionManagerApp:
         openai_protocol_box = ttk.Combobox(openai_protocol_row, textvariable=openai_protocol_var, state="readonly", values=("responses", "chat_completions"))
         openai_protocol_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        openai_image_generation_row = ttk.Frame(token_pool_frame)
+        openai_image_generation_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(openai_image_generation_row, text="Image output", width=16).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            openai_image_generation_row,
+            text="Disable image generation",
+            variable=openai_disable_image_generation_var,
+        ).pack(side=tk.LEFT)
+
         ttk.Label(token_pool_frame, text="OpenAI status", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 0))
         ttk.Label(token_pool_frame, textvariable=openai_status_var, justify=tk.LEFT, wraplength=540).pack(anchor="w", pady=(4, 8))
 
@@ -3212,6 +3257,9 @@ class SessionManagerApp:
             openai_preset_var.set(active_label)
             openai_preset_id_var.set(active_preset_id)
             openai_preset_name_var.set(str(active_preset.get("name", "")).strip() if active_preset is not None else active_preset_id)
+            openai_disable_image_generation_var.set(
+                bool(active_preset.get("disable_image_generation", False)) if active_preset is not None else bool(settings.get("disable_image_generation", False))
+            )
             openai_models = [str(item).strip() for item in openai_form_values.get("openai_models", []) if str(item).strip()]
             openai_model_values = openai_models or merge_available_models([])
             saved_openai_model = str(openai_form_values.get("openai_model", "")).strip()
@@ -3228,6 +3276,7 @@ class SessionManagerApp:
                 f"Discovered models: {len(openai_models)}\n"
                 f"Protocol: {str(openai_form_values.get('openai_protocol', '')).strip() or 'unverified'}\n"
                 f"Proxy mode: {openai_proxy_preference_var.get()}\n"
+                f"Image generation: {'disabled' if openai_disable_image_generation_var.get() else 'enabled'}\n"
                 f"Active preset: {active_preset_id or '-'}\n"
                 f"API key: {'configured' if str(openai_form_values.get('openai_api_key', '')).strip() else 'missing'}"
             )
@@ -3278,6 +3327,7 @@ class SessionManagerApp:
                 openai_proxy_preference_var.set(raw_pref if raw_pref in {"auto", "direct", "proxy"} else "direct")
                 raw_proto = str(preset.get("openai_protocol", "responses")).strip()
                 openai_protocol_var.set(raw_proto if raw_proto in {"responses", "chat_completions"} else "responses")
+                openai_disable_image_generation_var.set(bool(preset.get("disable_image_generation", False)))
 
         openai_preset_box.bind("<<ComboboxSelected>>", update_openai_preset_fields_from_selection)
 
@@ -3338,6 +3388,7 @@ class SessionManagerApp:
                     preset_name=openai_preset_name_var.get().strip(),
                     proxy_preference=openai_proxy_preference_var.get().strip(),
                     protocol_override=openai_protocol_var.get().strip(),
+                    disable_image_generation=openai_disable_image_generation_var.get(),
                 )
             except Exception as exc:
                 messagebox.showerror("OpenAI-Compatible API", str(exc), parent=dialog)
@@ -3375,6 +3426,7 @@ class SessionManagerApp:
                     create_new_preset=True,
                     proxy_preference=openai_proxy_preference_var.get().strip(),
                     protocol_override=openai_protocol_var.get().strip(),
+                    disable_image_generation=openai_disable_image_generation_var.get(),
                 )
             except Exception as exc:
                 messagebox.showerror("OpenAI-Compatible API", str(exc), parent=dialog)
@@ -3402,6 +3454,7 @@ class SessionManagerApp:
                     openai_model=openai_model_var.get().strip(),
                     openai_protocol=openai_protocol_var.get().strip(),
                     proxy_preference=openai_proxy_preference_var.get().strip(),
+                    disable_image_generation=openai_disable_image_generation_var.get(),
                 )
             except Exception as exc:
                 messagebox.showerror("OpenAI-Compatible API", str(exc), parent=dialog)

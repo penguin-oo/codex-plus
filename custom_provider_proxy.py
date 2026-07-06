@@ -644,7 +644,7 @@ def build_models_payload(model_ids: list[str] | tuple[str, ...]) -> dict[str, ob
             "comp_hash": "",
             "effective_context_window_percent": 95,
             "experimental_supported_tools": [],
-            "input_modalities": ["text"],
+            "input_modalities": ["text", "image"],
             "supports_search_tool": False,
             "use_responses_lite": False,
         }

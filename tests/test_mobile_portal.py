@@ -3149,6 +3149,53 @@ class ResumeArgsTests(unittest.TestCase):
 
         self.assertEqual("mimo-v2-pro", args[args.index("-m") + 1])
 
+    def test_build_resume_args_openai_compatible_refreshes_image_input_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backend_settings_path = Path(temp_dir) / "token_pool_settings.json"
+            models_path = Path(temp_dir) / "models_cache.json"
+            token_pool_settings.save_backend_settings(
+                token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                settings_file=backend_settings_path,
+                token_dir=Path(temp_dir) / "tokens",
+                proxy_port=8317,
+                proxy_api_key="pool-api-key",
+                openai_base_url="https://api.openai.com/v1",
+                openai_api_key="sk-test",
+                openai_model="gpt-5.5",
+                openai_models=["gpt-5.5"],
+                openai_protocol="responses",
+            )
+            models_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.5",
+                                "display_name": "gpt-5.5",
+                                "input_modalities": ["text"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(token_pool_settings, "DEFAULT_MODELS_CACHE_FILE", models_path):
+                mobile_portal.build_resume_args(
+                    output_file=Path("out.txt"),
+                    session_id="session-1",
+                    prompt="hello",
+                    model="default",
+                    sandbox="default",
+                    approval="default",
+                    reasoning_effort="default",
+                    backend_settings_file=backend_settings_path,
+                )
+
+            payload = json.loads(models_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(["text", "image"], payload["models"][0]["input_modalities"])
+
     def test_build_new_chat_args_uses_stdin_marker_for_prompt_text(self) -> None:
         args = mobile_portal.build_new_chat_args(
             output_file=Path("out.txt"),
@@ -3656,6 +3703,33 @@ class BackendOverrideArgsTests(unittest.TestCase):
         self.assertIn('model_providers.openai_compatible.base_url="https://api.openai.com/v1"', rendered)
         self.assertIn('model_providers.openai_compatible.env_key="CODEX_OPENAI_COMPATIBLE_API_KEY"', rendered)
         self.assertNotIn("features.image_generation=false", args)
+
+    def test_image_generation_patch_for_preset_writes_single_config_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text("[features]\ngoals = true\n", encoding="utf-8")
+
+            with mock.patch.object(mobile_portal, "_CODEX_CONFIG_PATH", config_path):
+                mobile_portal._patch_image_generation_for_preset({"disable_image_generation": True})
+                mobile_portal._patch_image_generation_for_preset({"disable_image_generation": True})
+
+            lines = config_path.read_text(encoding="utf-8").splitlines()
+            image_lines = [line for line in lines if line.strip().startswith("image_generation")]
+
+        self.assertEqual(["image_generation = false"], image_lines)
+
+    def test_image_generation_patch_for_preset_removes_config_line_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(
+                "[features]\nimage_generation = false\ngoals = true\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(mobile_portal, "_CODEX_CONFIG_PATH", config_path):
+                mobile_portal._patch_image_generation_for_preset({"disable_image_generation": False})
+
+            self.assertNotIn("image_generation", config_path.read_text(encoding="utf-8"))
 
     def test_build_backend_override_args_points_proxy_preference_to_local_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

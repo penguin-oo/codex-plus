@@ -702,7 +702,7 @@ class AppHelperTests(unittest.TestCase):
 
             self.assertEqual("[features]\n", config_path.read_text(encoding="utf-8"))
 
-    def test_openai_compatible_backend_launch_args_keep_image_input_enabled(self) -> None:
+    def test_openai_compatible_backend_launch_args_do_not_patch_image_generation(self) -> None:
         args = app.build_openai_compatible_provider_override_args(
             model="gpt-5.5",
             base_url="https://api.openai.com/v1",
@@ -710,6 +710,33 @@ class AppHelperTests(unittest.TestCase):
 
         self.assertIn("-c", args)
         self.assertNotIn("features.image_generation=false", args)
+
+    def test_image_generation_patch_for_preset_writes_single_config_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text("[features]\ngoals = true\n", encoding="utf-8")
+
+            with mock.patch.object(app, "_CODEX_CONFIG_PATH", config_path):
+                app._patch_image_generation_for_preset({"disable_image_generation": True})
+                app._patch_image_generation_for_preset({"disable_image_generation": True})
+
+            lines = config_path.read_text(encoding="utf-8").splitlines()
+            image_lines = [line for line in lines if line.strip().startswith("image_generation")]
+
+        self.assertEqual(["image_generation = false"], image_lines)
+
+    def test_image_generation_patch_for_preset_removes_config_line_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(
+                "[features]\nimage_generation = false\ngoals = true\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(app, "_CODEX_CONFIG_PATH", config_path):
+                app._patch_image_generation_for_preset({"disable_image_generation": False})
+
+            self.assertNotIn("image_generation", config_path.read_text(encoding="utf-8"))
 
     def test_save_openai_compatible_backend_settings_updates_named_active_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1018,6 +1045,7 @@ class AppHelperTests(unittest.TestCase):
                     openai_model="private-alt",
                     openai_protocol="chat_completions",
                     proxy_preference="proxy",
+                    disable_image_generation=True,
                 )
 
             reloaded = app.token_pool_settings.load_backend_settings(settings_file)
@@ -1032,6 +1060,99 @@ class AppHelperTests(unittest.TestCase):
         self.assertEqual("chat_completions", preset["openai_protocol"])
         self.assertEqual("proxy", preset["proxy_preference"])
         self.assertTrue(preset["skip_validation"])
+        self.assertTrue(preset["disable_image_generation"])
+
+    def test_apply_openai_compatible_preset_settings_updates_image_generation_config_from_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "token_pool_settings.json"
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text("[features]\n", encoding="utf-8")
+            app.token_pool_settings.save_backend_settings(
+                app.token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                settings_file=settings_file,
+                token_dir=Path(temp_dir) / "tokens",
+                proxy_port=8317,
+                proxy_api_key="pool-api-key",
+                openai_base_url="https://first.example/v1",
+                openai_api_key="sk-first",
+                openai_model="first-model",
+                openai_models=["first-model"],
+                openai_protocol="responses",
+            )
+            app.token_pool_settings.save_openai_preset(
+                settings_file=settings_file,
+                preset_id="private-provider",
+                name="Private Provider",
+                openai_base_url="https://private.example/v1",
+                openai_api_key="sk-private",
+                openai_model="private-model",
+                openai_models=["private-model"],
+                openai_protocol="responses",
+                skip_validation=True,
+                disable_image_generation=False,
+                set_active=False,
+            )
+            manager = object.__new__(app.SessionManagerApp)
+            manager._stop_token_pool_proxy = mock.Mock()
+            manager._start_openai_compatible_proxy = mock.Mock()
+            manager._load_available_models = mock.Mock(return_value=["private-model"])
+            manager._render_models = mock.Mock()
+
+            with mock.patch.object(app, "_CODEX_CONFIG_PATH", config_path), \
+                 mock.patch.object(app.token_pool_settings, "resolve_openai_compatible_backend_config"):
+                updated = app.SessionManagerApp._apply_openai_compatible_preset_settings(
+                    manager,
+                    "private-provider",
+                    settings_file=settings_file,
+                    disable_image_generation=True,
+                )
+
+            reloaded = app.token_pool_settings.load_backend_settings(settings_file)
+            image_lines = [
+                line
+                for line in config_path.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("image_generation")
+            ]
+
+        preset = next(item for item in reloaded["openai_presets"] if item["id"] == "private-provider")
+        self.assertTrue(updated["disable_image_generation"])
+        self.assertTrue(preset["disable_image_generation"])
+        self.assertEqual(["image_generation = false"], image_lines)
+
+    def test_save_openai_compatible_preset_settings_can_set_disable_image_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "token_pool_settings.json"
+            app.token_pool_settings.save_backend_settings(
+                app.token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+                settings_file=settings_file,
+                token_dir=Path(temp_dir) / "tokens",
+                proxy_port=8317,
+                proxy_api_key="pool-api-key",
+            )
+
+            with mock.patch.object(
+                app.token_pool_settings,
+                "resolve_openai_compatible_backend_config",
+                return_value={
+                    "openai_base_url": "https://provider.example.test/v1",
+                    "openai_api_key": "sk-test",
+                    "openai_model": "gpt-5.5",
+                    "openai_models": ["gpt-5.5"],
+                    "openai_protocol": "responses",
+                },
+            ):
+                updated = app.save_openai_compatible_preset_settings(
+                    settings_file=settings_file,
+                    base_url="https://provider.example.test/v1",
+                    api_key="sk-test",
+                    model="gpt-5.5",
+                    preset_name="Provider",
+                    create_new_preset=True,
+                    disable_image_generation=True,
+                )
+
+        preset = next(item for item in updated["openai_presets"] if item["id"] == "provider")
+        self.assertTrue(preset["disable_image_generation"])
 
     def test_save_openai_compatible_backend_settings_skips_validation_for_skip_preset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1293,6 +1414,51 @@ class AppHelperTests(unittest.TestCase):
         args = app.SessionManagerApp._build_codex_new_args(manager)
 
         self.assertEqual("mimo-v2-pro", args[args.index("-m") + 1])
+
+    def test_build_codex_new_args_openai_compatible_refreshes_image_input_metadata(self) -> None:
+        manager = object.__new__(app.SessionManagerApp)
+        manager.use_global_defaults_var = mock.Mock()
+        manager.use_global_defaults_var.get.return_value = True
+        manager.model_var = mock.Mock()
+        manager.model_var.get.return_value = "default"
+        manager.approval_var = mock.Mock()
+        manager.approval_var.get.return_value = "default"
+        manager.sandbox_var = mock.Mock()
+        manager.sandbox_var.get.return_value = "default"
+        manager.search_var = mock.Mock()
+        manager.search_var.get.return_value = False
+        manager._build_codex_override_args = mock.Mock(return_value=[])
+        manager._build_backend_override_args = mock.Mock(return_value=["BACKEND"])
+        manager._token_pool_settings = mock.Mock(
+            return_value={
+                "backend_mode": app.token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                "openai_model": "gpt-5.5",
+                "openai_models": ["gpt-5.5"],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            models_path = Path(temp_dir) / "models_cache.json"
+            models_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-5.5",
+                                "display_name": "gpt-5.5",
+                                "input_modalities": ["text"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(app.token_pool_settings, "DEFAULT_MODELS_CACHE_FILE", models_path):
+                app.SessionManagerApp._build_codex_new_args(manager)
+
+            payload = json.loads(models_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(["text", "image"], payload["models"][0]["input_modalities"])
 
     def test_token_pool_status_summary_ignores_proxy_from_other_backend_mode_for_codex_auth(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
