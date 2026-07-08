@@ -14,6 +14,10 @@ Codex+ 是一个面向 Windows 的 Codex 会话管理工具。它把本机 Codex
 
 ![桌面端概览](assets/ui-overview.png)
 
+账号与后端配置：
+
+![账号与后端配置](assets/account-backend-redacted.png)
+
 ## 核心功能
 
 - 桌面端浏览、搜索和继续本机 Codex 会话。
