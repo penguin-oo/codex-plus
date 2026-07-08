@@ -1,14 +1,26 @@
 # Codex+
 
+语言：中文 | [English](README.en.md)
+
 Codex+ 是一个 Windows 桌面端 + 手机端的 Codex 会话管理工具。它可以集中管理本机 Codex CLI 会话，在电脑上启动、查看、继续和清理会话，也可以通过手机浏览器或 Android APP 连接电脑上的 portal，随时查看最近会话、继续对话、停止回复或新建任务。
 
-项目适合这些场景：
+适合这些场景：
 
 - 电脑上长期运行 Codex，会话很多，需要快速搜索、打开和继续。
 - 想在手机上查看电脑里的 Codex 会话进度。
 - 想用手机发消息、上传图片、停止回复或创建新会话。
 - 需要在多个 Codex 账号槽位之间切换。
 - 需要在 Codex Auth、内置 Token Pool、OpenAI-Compatible API 之间切换后端。
+
+## 界面预览
+
+截图文件保存在仓库中：
+
+| 页面 | 截图 |
+| --- | --- |
+| 手机端首页 | [assets/mobile-home.jpg](assets/mobile-home.jpg) |
+| 桌面端概览 | [assets/ui-overview.png](assets/ui-overview.png) |
+| 账号与后端配置 | [assets/account-backend-redacted.png](assets/account-backend-redacted.png) |
 
 ## 功能
 
@@ -26,20 +38,6 @@ Codex+ 是一个 Windows 桌面端 + 手机端的 Codex 会话管理工具。它
 - Android APP：可直接安装 debug APK，也可以自行构建。
 - 远程辅助：可选通过 SSH/Tailscale 重启配置好的电脑。
 
-## 界面预览
-
-手机端首页：
-
-![手机端首页](https://images.weserv.nl/?url=raw.githubusercontent.com/penguin-oo/codex-plus/main/assets/mobile-home.jpg)
-
-桌面端概览：
-
-![桌面端概览](https://images.weserv.nl/?url=raw.githubusercontent.com/penguin-oo/codex-plus/main/assets/ui-overview.png)
-
-账号与后端配置：
-
-![账号与后端配置](https://images.weserv.nl/?url=raw.githubusercontent.com/penguin-oo/codex-plus/main/assets/account-backend-redacted.png)
-
 ## 环境要求
 
 桌面端和手机 portal：
@@ -47,7 +45,7 @@ Codex+ 是一个 Windows 桌面端 + 手机端的 Codex 会话管理工具。它
 - Windows 10/11
 - Python 3.11 或更新版本
 - Codex CLI，并且 `codex` 命令在 `PATH` 中可用
-- Python `requests`
+- Python `requests[socks]`
 - Tkinter，官方 Windows Python 通常自带
 
 Android APP 构建：
@@ -162,7 +160,7 @@ android-app\app\build\outputs\apk\debug\app-debug.apk
 ├─ app/
 │  └─ CodexPlus-debug.apk         # Android debug 安装包
 ├─ android-app/                   # Android APP 源码
-├─ assets/                        # README 展示图片
+├─ assets/                        # README 展示截图
 └─ scripts/
    └─ ensure-boot-network.ps1     # 启动网络辅助脚本
 ```
