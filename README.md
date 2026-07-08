@@ -1,364 +1,238 @@
 # Codex+
 
-Codex+ is a Windows desktop and phone-control toolkit for local Codex CLI sessions. It gives you a desktop session browser, a mobile web portal, and an optional Android client for continuing Codex conversations from a phone.
+Codex+ 是一个面向 Windows 的 Codex 会话管理工具。它把本机 Codex CLI 会话、桌面管理器、手机网页入口和 Android 客户端放在一起，适合在电脑上跑 Codex，同时用手机查看会话、继续对话、停止回复或远程重启主机。
 
-The project is designed for local-first use. It does not ship API keys, account tokens, OpenAI auth files, proxy lists, or machine-specific settings. Every user must configure their own Codex account, token pool, or OpenAI-compatible API provider after cloning or downloading a release.
+这个项目按“本地优先”设计。仓库不内置你的 API Key、Codex 登录文件、账号 token、代理列表、机器码或私人服务配置；这些内容都应保存在本机 `%USERPROFILE%\.codex\...` 或其他本地目录中。
 
-## Features
+## 界面预览
 
-- Browse local Codex sessions from a Windows desktop UI.
-- Resume existing sessions or start new sessions in selected folders.
-- Use a phone browser or Android client through the mobile portal.
-- Stop active replies and monitor reply status from the phone.
-- Store per-session notes and per-account notes locally.
-- Use one of three backend modes:
-  - normal Codex auth from your local Codex CLI setup
-  - built-in token-pool proxy for local token JSON files
-  - OpenAI-compatible API presets for third-party compatible providers
-- Expose the mobile portal through LAN, Tailscale, or your own public domain.
-- Optionally restart another computer over SSH when you provide the host/user/key/password at runtime.
+手机端首页：
 
-## What Is Not Included
+![手机端首页](assets/mobile-home.jpg)
 
-This repository intentionally does not include:
+桌面端概览：
 
-- packaged zip/exe/apk files in git
-- user API keys or provider presets
-- Codex `auth.json` or account tokens
-- token-pool files
-- local IP addresses or private hostnames
-- SSH private keys, SSH public keys, or passwords
-- personal mobile portal tokens
+![桌面端概览](assets/ui-overview.png)
 
-Build artifacts should be distributed through GitHub Releases or your own build pipeline, not committed into the repository.
+## 核心功能
 
-## Requirements
+- 桌面端浏览、搜索和继续本机 Codex 会话。
+- 在指定目录启动新 Codex 会话。
+- 手机浏览器或 Android APP 连接电脑上的 mobile portal。
+- 手机上查看最近会话、全部会话、新建会话、停止回复。
+- 支持图片输入，OpenAI-Compatible 模式下会维护模型的图片输入元数据。
+- 支持三种后端模式：
+  - `Codex Auth`：使用本机 Codex CLI 登录状态。
+  - `Built-In Token Pool`：读取本机 token 文件并通过本地代理转发。
+  - `OpenAI-Compatible API`：使用你本机保存的兼容 API 预设。
+- 每个 OpenAI-Compatible 预设可以配置模型、协议、代理策略、跳过验证、安装 ID、Claude 环境变量补丁，以及是否禁用图片生成。
+- 可以通过 LAN、Tailscale 或自己的域名访问手机端。
+- 可选通过 SSH/Tailscale 重启另一台电脑。
 
-Desktop and portal:
+## 手机 APP 在哪里
+
+仓库里保留了一个可直接安装的 debug APK：
+
+```text
+app/CodexPlus-debug.apk
+```
+
+Android 项目源码在：
+
+```text
+android-app/
+```
+
+如果只想使用手机端，也可以不安装 APP，直接在手机浏览器打开 `run-mobile.bat` 打印出来的 portal URL。
+
+## 项目结构
+
+```text
+.
+├─ app.py                         # Windows 桌面管理器
+├─ mobile_portal.py               # 手机网页入口和 Android APP 调用的本地服务
+├─ token_pool_proxy.py            # Built-In Token Pool 本地代理
+├─ custom_provider_proxy.py       # OpenAI-Compatible 协议适配代理
+├─ token_pool_settings.py         # 后端模式、API 预设和本地配置读写
+├─ auth_slots.py                  # Codex 账号槽位管理
+├─ controlled_browser.py          # 受控浏览器辅助逻辑
+├─ process_singleton.py           # 启动时清理同项目旧进程
+├─ remote_ssh.py                  # 远程重启相关 SSH 逻辑
+├─ session_context_repair.py      # 会话上下文修复辅助
+├─ run.bat                        # 启动桌面端
+├─ run-mobile.bat                 # 启动手机 portal
+├─ app/
+│  └─ CodexPlus-debug.apk         # Android debug 安装包
+├─ android-app/                   # Android APP 源码
+├─ assets/
+│  ├─ mobile-home.jpg             # 手机端展示图
+│  └─ ui-overview.png             # 桌面端展示图
+└─ scripts/
+   └─ ensure-boot-network.ps1     # 启动网络辅助脚本
+```
+
+为了让公开仓库更清爽，测试文件和开发计划文档没有保留在主分支里。核心运行文件、Android 源码、APK 和展示图片保留。
+
+## 快速开始
+
+### 1. 准备环境
+
+需要：
 
 - Windows 10/11
-- Python 3.11+
-- Codex CLI available in `PATH`
-- Tkinter, usually included with the standard Python installer
+- Python 3.11 或更新版本
+- Codex CLI 已安装并在 `PATH` 中可用
+- Tkinter，通常随官方 Python 安装
 
-Android client development:
-
-- Android Studio or a compatible Gradle/JDK setup
-
-Optional:
-
-- Tailscale for private cross-network phone access
-- Cloudflare Tunnel, Nginx Proxy Manager, Caddy, or another reverse proxy for domain access
-- PuTTY `plink.exe` if you want password-based SSH restart from Windows
-
-## New User Setup Checklist
-
-Download or prepare:
-
-- This project, either by cloning the repository or downloading a release source package.
-- Python 3.11 or newer for the desktop manager and mobile portal.
-- Codex CLI, installed and available as `codex` or `codex.cmd` in `PATH`.
-- Windows Terminal is recommended for the desktop terminal experience.
-- Android APK only if you want the native phone client; otherwise a phone browser is enough.
-- Tailscale, Cloudflare Tunnel, Caddy, Nginx, or another proxy only if you need cross-network or domain access.
-
-First-time configuration:
-
-1. Verify Codex CLI works in a normal terminal:
+先确认 Codex CLI 可用：
 
 ```powershell
 codex --version
 codex login
 ```
 
-2. Start the desktop manager:
+### 2. 启动桌面端
 
 ```bat
 run.bat
 ```
 
-3. Start the mobile portal:
+桌面端用于浏览会话、打开账号管理、选择后端模式、配置 OpenAI-Compatible API 预设。
+
+### 3. 启动手机端服务
 
 ```bat
 run-mobile.bat
 ```
 
-4. Open the printed phone URL. Keep the `token` value private.
-5. Choose one backend mode:
-   - `Codex Auth` if your local Codex CLI login should be used.
-   - `Built-In Token Pool` if you have local token JSON files.
-   - `OpenAI-Compatible API` if you have a provider base URL and API credential.
-6. If you use OpenAI-compatible API mode, create your own local preset in the app. Presets are stored locally in:
+启动后终端会打印手机访问地址，类似：
+
+```text
+http://192.168.x.x:8765/?token=...
+```
+
+把这个地址复制到手机浏览器，或者在 Android APP 中填写 portal 地址和 token。
+
+## 后端模式说明
+
+### Codex Auth
+
+使用本机 Codex CLI 的正常登录状态。适合已经通过 `codex login` 登录的用户。
+
+### Built-In Token Pool
+
+读取本机 token 文件并启动本地代理。默认 token 文件目录是：
+
+```text
+%USERPROFILE%\.cli-proxy-api
+```
+
+这些 token 文件是私人数据，不应提交到 GitHub。
+
+### OpenAI-Compatible API
+
+用于兼容 OpenAI/Codex 请求格式的第三方服务。预设保存在本机：
 
 ```text
 %USERPROFILE%\.codex\token_pool_settings.json
 ```
 
-7. If you use token-pool mode, place token files locally and do not commit them:
+每个预设可配置：
 
-```text
-%USERPROFILE%\.cli-proxy-api
-```
+- Base URL
+- API Key
+- Model
+- Responses 或 Chat Completions 协议
+- direct/proxy/auto 代理策略
+- 是否跳过验证
+- 是否禁用图片生成
+- installation_id 和 Claude 环境变量补丁
 
-8. If you use a domain, proxy HTTPS traffic to the portal:
+公开仓库不包含任何预设、Key 或私人 URL。
 
-```text
-http://127.0.0.1:8765
-```
+## 手机访问方式
 
-9. If you use multiple computers, repeat the local configuration on each computer or copy only your own private config files manually. Do not publish those files to GitHub.
+### 同一局域网
 
-Local-only files you normally configure yourself:
-
-- `%USERPROFILE%\.codex\config.toml`
-- `%USERPROFILE%\.codex\token_pool_settings.json`
-- `%USERPROFILE%\.codex\mobile_portal_settings.json`
-- `%USERPROFILE%\.codex\installation_id`
-- `%USERPROFILE%\.cli-proxy-api\...`
-- any SSH keys, proxy lists, API keys, account tokens, or provider credentials
-
-## Quick Start From Source
-
-```powershell
-git clone https://github.com/penguin-oo/codex-plus.git
-cd codex-plus
-```
-
-Start the desktop manager:
-
-```bat
-run.bat
-```
-
-Start the mobile portal:
-
-```bat
-run-mobile.bat
-```
-
-The portal prints one or more URLs. Open one of them on your phone and include the printed `token` query parameter.
-
-## Phone Access Options
-
-### Same LAN
-
-Start `run-mobile.bat` and use the LAN URL printed by the portal, for example:
-
-```text
-http://192.0.2.10:8765/?token=...
-```
+电脑和手机在同一 Wi-Fi 下，直接使用 `run-mobile.bat` 打印出的 LAN URL。
 
 ### Tailscale
 
-Use this when the phone and PC are not on the same Wi-Fi but can join the same tailnet.
+电脑和手机加入同一个 tailnet 后，可以使用 Tailscale 地址访问 portal。
 
-1. Install and sign in to Tailscale on the PC and phone.
-2. Start `run-mobile.bat` on the PC.
-3. Use the printed Tailscale URL, for example:
+### 自有域名
 
-```text
-http://desktop-name.tailnet-name.ts.net:8765/?token=...
-```
-
-### Domain Hosting
-
-Use this when you want a normal domain such as `https://codex.example.com` to open the phone portal.
-
-The portal listens locally on port `8765`. Your domain or tunnel must forward HTTPS traffic to:
+可以用 Cloudflare Tunnel、Nginx、Caddy 等把 HTTPS 域名转发到：
 
 ```text
 http://127.0.0.1:8765
 ```
 
-Important security rules:
+注意：
 
-- Keep the `?token=...` value private.
-- Use HTTPS for public domains.
-- Do not expose the portal without the token.
-- Prefer Tailscale for personal use; use public domains only when you understand the risk.
+- `token` 是访问凭证，不要公开。
+- 公开域名必须使用 HTTPS。
+- 不要把 portal 无 token 暴露到公网。
 
-#### Cloudflare Tunnel Example
+## Android APP 构建
 
-1. Install `cloudflared` on the Windows PC.
-2. Authenticate Cloudflare:
-
-```powershell
-cloudflared tunnel login
-```
-
-3. Create a tunnel:
-
-```powershell
-cloudflared tunnel create codex-session-manager
-```
-
-4. Route your domain to the tunnel:
-
-```powershell
-cloudflared tunnel route dns codex-session-manager codex.example.com
-```
-
-5. Create `%USERPROFILE%\.cloudflared\config.yml`:
-
-```yaml
-tunnel: codex-session-manager
-credentials-file: C:\Users\YOUR_USER\.cloudflared\TUNNEL_ID.json
-
-ingress:
-  - hostname: codex.example.com
-    service: http://127.0.0.1:8765
-  - service: http_status:404
-```
-
-6. Run the tunnel:
-
-```powershell
-cloudflared tunnel run codex-session-manager
-```
-
-7. Add the public base URL to `%USERPROFILE%\.codex\mobile_portal_settings.json`:
-
-```json
-{
-  "public_urls": [
-    "https://codex.example.com"
-  ]
-}
-```
-
-8. Restart `run-mobile.bat`. The portal will print a public URL with the current token.
-
-#### Nginx/Caddy/Other Reverse Proxy
-
-Forward your HTTPS domain to the Windows PC on port `8765`.
-
-Example upstream:
+本机已验证可用的 Gradle 路径：
 
 ```text
-http://PC_LAN_IP:8765
+C:\Users\MECHREVO\.gradle\wrapper\dists\gradle-9.0.0-bin\d6wjpkvcgsg3oed0qlfss3wgl\gradle-9.0.0\bin\gradle.bat
 ```
 
-Then add the domain to `%USERPROFILE%\.codex\mobile_portal_settings.json`:
+构建命令：
 
-```json
-{
-  "public_urls": [
-    "https://codex.example.com"
-  ]
-}
+```powershell
+cd android-app
+$env:ANDROID_HOME='C:\Users\MECHREVO\AppData\Local\Android\Sdk'
+$env:ANDROID_SDK_ROOT='C:\Users\MECHREVO\AppData\Local\Android\Sdk'
+& 'C:\Users\MECHREVO\.gradle\wrapper\dists\gradle-9.0.0-bin\d6wjpkvcgsg3oed0qlfss3wgl\gradle-9.0.0\bin\gradle.bat' :app:assembleDebug --console=plain
 ```
 
-Restart `run-mobile.bat` after editing the file.
-
-## Backend Modes
-
-Open the desktop manager and use the backend controls to choose one mode.
-
-### Codex Auth
-
-Uses your normal local Codex CLI authentication. This is the cleanest mode if `codex` already works in a terminal.
-
-### Built-In Token Pool
-
-Stores token JSON files under:
+构建输出通常在：
 
 ```text
-%USERPROFILE%\.cli-proxy-api
+android-app\app\build\outputs\apk\debug\app-debug.apk
 ```
 
-The app starts a local proxy and rotates usable token files. Token files are local-only and should never be committed.
-
-### OpenAI-Compatible API
-
-Use this for providers that expose OpenAI-compatible or Codex-compatible endpoints.
-
-General steps:
-
-1. Open backend settings.
-2. Choose OpenAI-Compatible API.
-3. Add a preset name.
-4. Enter the provider base URL.
-5. Enter your own provider credential for that preset.
-6. Save or refresh models.
-7. Apply the preset.
-8. Restart the local proxy if it is already running.
-
-Provider notes:
-
-- Some Codex-oriented providers require the Responses API and Codex CLI-style request headers.
-- Some providers require a base URL with `/v1`; others require a custom path such as `/codex`.
-- The app stores presets locally in `%USERPROFILE%\.codex\token_pool_settings.json`.
-- Presets are not bundled with this repository.
-
-## Startup Single-Instance Cleanup
-
-When the desktop manager or mobile portal starts, it cleans older processes from this same project directory. This prevents duplicate `app.py`, `mobile_portal.py`, and local proxy instances from fighting over ports such as `8317` and `8765`.
-
-The cleanup is scoped to this project path and does not kill unrelated Python processes.
-
-Set this environment variable to disable startup cleanup:
-
-```powershell
-$env:CODEX_SESSION_MANAGER_SKIP_STARTUP_CLEANUP='1'
-```
-
-## Remote Restart Feature
-
-The remote restart feature sends an SSH command to a host that you provide at runtime:
+仓库中提供的安装包是：
 
 ```text
-shutdown /r /t 0
+app\CodexPlus-debug.apk
 ```
 
-The repository does not hard-code a local IP, hostname, username, private key, or password. If you configure defaults, they are stored in your local `%USERPROFILE%\.codex\mobile_portal_settings.json` and should not be committed.
+## 本地私人配置
 
-Password mode requires `plink.exe`. Key mode uses the system `ssh` client.
-
-## Controlled Browser Attach
-
-The browser attach tools assume you run a browser with a known remote-debugging port. Typical examples:
+这些文件只应保存在本机，不要提交到 GitHub：
 
 ```text
-http://127.0.0.1:9222
-http://127.0.0.1:9223
+%USERPROFILE%\.codex\auth.json
+%USERPROFILE%\.codex\config.toml
+%USERPROFILE%\.codex\token_pool_settings.json
+%USERPROFILE%\.codex\mobile_portal_settings.json
+%USERPROFILE%\.codex\installation_id
+%USERPROFILE%\.cli-proxy-api\...
 ```
 
-Launcher scripts and profile paths are machine-specific. Keep them outside the repository or adapt them for your own environment.
+不要提交：
 
-## Build Releases
+- API Key
+- OAuth access token / refresh token
+- Codex auth 文件
+- token pool 文件
+- SSH 私钥、密码
+- 代理列表
+- 个人域名、内网 IP、机器码
+- 本机特殊 provider 配置
 
-Build artifacts are intentionally ignored by git. Use GitHub Actions or local build commands to create release packages.
+## 发布说明
 
-The workflow in `.github/workflows/release.yml` builds zip artifacts when you run it manually or push a version tag:
+当前仓库没有使用 GitHub Releases。安装包直接放在：
 
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
+```text
+app/CodexPlus-debug.apk
 ```
 
-GitHub Releases are the recommended place to publish downloads.
-
-## Development
-
-Run Python tests:
-
-```powershell
-python -m pytest
-```
-
-Compile-check key modules:
-
-```powershell
-python -m py_compile app.py mobile_portal.py custom_provider_proxy.py token_pool_proxy.py token_pool_settings.py process_singleton.py
-```
-
-## Privacy Checklist Before Publishing Forks
-
-Before making your own fork public, verify:
-
-- no files under `release/` are committed unless intentionally published
-- no `.codex` files are committed
-- no `.cli-proxy-api` token files are committed
-- no API keys, access tokens, refresh tokens, SSH keys, or passwords are committed
-- no personal hostnames or private IPs are committed
-- no local `mobile_portal_settings.json` or `token_pool_settings.json` is committed
+如果以后要正式发布，可以再启用 GitHub Releases 或 CI 构建流程。
