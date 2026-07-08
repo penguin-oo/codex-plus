@@ -190,3 +190,7 @@ app/CodexPlus-debug.apk
 ## Community
 
 Feedback from the [LINUX DO](https://linux.do) community is welcome.
+
+## License
+
+[MIT](LICENSE)
