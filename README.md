@@ -186,3 +186,7 @@ dist\
 ```text
 app/CodexPlus-debug.apk
 ```
+
+## 社区
+
+项目欢迎来自 [LINUX DO](https://linux.do) 社区的建议和反馈。

@@ -186,3 +186,7 @@ This project currently does not use GitHub Releases. The installable Android APK
 ```text
 app/CodexPlus-debug.apk
 ```
+
+## Community
+
+Feedback from the [LINUX DO](https://linux.do) community is welcome.
