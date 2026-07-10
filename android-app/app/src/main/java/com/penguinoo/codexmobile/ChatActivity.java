@@ -362,7 +362,8 @@ public final class ChatActivity extends AppCompatActivity {
             pendingUserMessage = null;
             setComposerEnabled(currentLease != null);
             renderConversation(ChatStreamingState.resolveLiveText(activeJob), false);
-            showBanner(ChatWatchState.displayError(activeJob));
+            stickyBanner = ChatWatchState.displayError(activeJob);
+            showBanner(stickyBanner);
             return;
         }
         attachedJobId = "";
@@ -539,8 +540,8 @@ public final class ChatActivity extends AppCompatActivity {
     }
 
     private void watchJobLoop(String jobId, int generation) {
+        PortalJob finalJob = null;
         try {
-            PortalJob finalJob = null;
             while (generation == watchGeneration) {
                 try {
                     finalJob = apiClient.fetchJob(endpoint, jobId);
@@ -604,7 +605,8 @@ public final class ChatActivity extends AppCompatActivity {
                     watchingJobId = "";
                     setComposerEnabled(currentLease != null);
                     renderConversation(ChatStreamingState.resolveLiveText(failedJob), false);
-                    showBanner(ChatWatchState.displayError(failedJob));
+                    stickyBanner = ChatWatchState.displayError(failedJob);
+                    showBanner(stickyBanner);
                 });
                 return;
             }
@@ -644,8 +646,16 @@ public final class ChatActivity extends AppCompatActivity {
             if (generation != watchGeneration) {
                 return;
             }
+            PortalJob interruptedJob = finalJob;
             watchGeneration++;
-            runOnUiThread(() -> handlePortalUnavailable("Connection lost. Keep run-mobile.bat open, then refresh."));
+            runOnUiThread(() -> {
+                attachedJobId = "";
+                watchingJobId = "";
+                setComposerEnabled(currentLease != null);
+                renderConversation(ChatStreamingState.resolveLiveText(interruptedJob), false);
+                stickyBanner = ChatWatchState.displayError(interruptedJob);
+                showBanner(stickyBanner);
+            });
         }
     }
 

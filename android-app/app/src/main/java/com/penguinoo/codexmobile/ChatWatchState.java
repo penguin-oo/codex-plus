@@ -2,6 +2,7 @@ package com.penguinoo.codexmobile;
 
 public final class ChatWatchState {
     private static final int INVALIDATE_AFTER_FAILURES = 5;
+    private static final String INTERRUPTION_MESSAGE = "Reply interrupted. The response may be incomplete.";
 
     private ChatWatchState() {
     }
@@ -34,6 +35,6 @@ public final class ChatWatchState {
         if (job != null && job.error != null && !job.error.trim().isEmpty()) {
             return job.error.trim();
         }
-        return "Job failed.";
+        return INTERRUPTION_MESSAGE;
     }
 }
