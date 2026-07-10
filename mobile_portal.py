@@ -41,7 +41,8 @@ except ModuleNotFoundError:
 APP_TITLE = "Codex+"
 DEFAULT_PROXY_URL = "socks5h://127.0.0.1:7897"
 DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1"
-REASONING_EFFORT_OPTIONS = ["default", "low", "medium", "high", "xhigh"]
+DEFAULT_REASONING_EFFORT = "max"
+REASONING_EFFORT_OPTIONS = [DEFAULT_REASONING_EFFORT, "default", "low", "medium", "high", "xhigh"]
 CODEX_HOME = Path(os.environ.get("USERPROFILE", "")) / ".codex"
 AUTH_FILE = CODEX_HOME / "auth.json"
 HISTORY_FILE = CODEX_HOME / "history.jsonl"
@@ -74,9 +75,12 @@ PROCESS_EXIT_GRACE_SECONDS = 1.0
 PROCESS_STARTUP_NO_OUTPUT_TIMEOUT_SECONDS = 300.0
 PROCESS_MAX_RUNTIME_SECONDS = 0.0
 INCOMPLETE_REPLY_PLACEHOLDER = "This reply ended without a final answer. Please continue or retry."
-DEFAULT_PRIMARY_MODEL = "gpt-5.5"
+DEFAULT_PRIMARY_MODEL = "gpt-5.6-sol"
 FALLBACK_MODEL_OPTIONS = (
     DEFAULT_PRIMARY_MODEL,
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",
     "gpt-5.2",
@@ -482,12 +486,18 @@ def resolve_launch_model_for_backend(model: str, backend_settings: dict[str, obj
         return DEFAULT_PRIMARY_MODEL
 
     allowed_models = unique_model_ids(backend_settings.get("openai_models", []))
-    if clean_model and clean_model != "default" and (not allowed_models or clean_model in allowed_models):
+    if (
+        clean_model
+        and clean_model != "default"
+        and (clean_model == DEFAULT_PRIMARY_MODEL or not allowed_models or clean_model in allowed_models)
+    ):
         return clean_model
 
     configured_model = str(backend_settings.get("openai_model", "")).strip()
     if configured_model and (not allowed_models or configured_model in allowed_models):
         return configured_model
+    if DEFAULT_PRIMARY_MODEL:
+        return DEFAULT_PRIMARY_MODEL
     if allowed_models:
         return allowed_models[0]
     return configured_model
@@ -1877,6 +1887,18 @@ def merge_available_models(models: list[str]) -> list[str]:
         seen.add(clean_model)
         merged.append(clean_model)
     return merged
+
+
+def default_model_options(models: list[str]) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for model in (DEFAULT_PRIMARY_MODEL, "default", *models, *FALLBACK_MODEL_OPTIONS[1:]):
+        clean_model = str(model).strip()
+        if not clean_model or clean_model in seen:
+            continue
+        seen.add(clean_model)
+        values.append(clean_model)
+    return values
 
 
 def unique_model_ids(models: object) -> list[str]:
@@ -4169,7 +4191,7 @@ class PortalService:
             "sessions": sessions,
             "mcp": [asdict(item) for item in self.data_store.load_mcp_items()],
             "skills": [asdict(item) for item in self.data_store.load_skill_items()],
-            "models": ["default", *self.data_store.load_available_models()],
+            "models": default_model_options(self.data_store.load_available_models()),
             "approval_options": ["default", "untrusted", "on-request", "never"],
             "sandbox_options": ["default", "read-only", "workspace-write", "danger-full-access"],
             "reasoning_options": list(REASONING_EFFORT_OPTIONS),
@@ -4202,7 +4224,7 @@ class PortalService:
         payload["owner"] = self.jobs.current_owner(session_id)
         payload["active_job"] = active_job or self.jobs.latest_failed_job_for_session(session_id)
         payload["proxy_summary"] = current_proxy_summary(self.proxy_settings_file)
-        payload["models"] = ["default", *self.data_store.load_available_models()]
+        payload["models"] = default_model_options(self.data_store.load_available_models())
         payload["approval_options"] = ["default", "untrusted", "on-request", "never"]
         payload["sandbox_options"] = ["default", "read-only", "workspace-write", "danger-full-access"]
         payload["reasoning_options"] = list(REASONING_EFFORT_OPTIONS)
@@ -4826,7 +4848,7 @@ INDEX_HTML = """<!doctype html>
           <p>${esc(item.cwd || "-")}</p>
           <div class="session-meta">
             <span class="pill">${timeText(item.ts)}</span>
-            <span class="pill">${esc(item.model || "default")}</span>
+            <span class="pill">${esc(item.model || "gpt-5.6-sol")}</span>
           </div>
           ${item.note ? `<div class="note">${esc(item.note)}</div>` : ""}
         </article>`).join("");
@@ -4971,7 +4993,7 @@ INDEX_HTML = """<!doctype html>
         clearSession();
         return payload;
       }
-      document.getElementById("detailHead").innerHTML = `<h2>${esc(item.text || item.session_id)}</h2><p>${esc(item.cwd || "-")}<br>${esc(item.session_id)}<br>Model: ${esc(item.model || "default")} | Approval: ${esc(item.approval_policy || "-")} | Sandbox: ${esc(item.sandbox_mode || "-")} | Reasoning: ${esc(item.reasoning_effort || "default")}</p>`;
+      document.getElementById("detailHead").innerHTML = `<h2>${esc(item.text || item.session_id)}</h2><p>${esc(item.cwd || "-")}<br>${esc(item.session_id)}<br>Model: ${esc(item.model || "gpt-5.6-sol")} | Approval: ${esc(item.approval_policy || "-")} | Sandbox: ${esc(item.sandbox_mode || "-")} | Reasoning: ${esc(item.reasoning_effort || "max")}</p>`;
       document.getElementById("noteInput").value = item.note || "";
       document.getElementById("noteBox").hidden = false;
       document.getElementById("composerSettings").hidden = false;
@@ -5201,13 +5223,22 @@ class PortalHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/downloads/"):
             file_name = parsed.path.removeprefix("/downloads/").strip()
-            if file_name not in ALLOWED_DOWNLOAD_FILES:
+            file_path = RELEASES_DIR / file_name
+            try:
+                resolved_file = file_path.resolve(strict=True)
+                resolved_root = RELEASES_DIR.resolve(strict=True)
+            except OSError:
                 self._send_json({"error": "File not found."}, status=HTTPStatus.NOT_FOUND)
                 return
-            file_path = RELEASES_DIR / file_name
+            if (
+                file_name not in ALLOWED_DOWNLOAD_FILES
+                and (not resolved_file.is_file() or not path_is_within_root(resolved_file, resolved_root))
+            ):
+                self._send_json({"error": "File not found."}, status=HTTPStatus.NOT_FOUND)
+                return
             self._send_binary_file(
-                file_path=file_path,
-                content_type=guess_release_file_content_type(file_path),
+                file_path=resolved_file,
+                content_type=guess_release_file_content_type(resolved_file),
                 file_name=file_name,
             )
             return
@@ -5347,7 +5378,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     model=str(payload.get("model", "default")),
                     approval_policy=str(payload.get("approval_policy", "default")),
                     sandbox_mode=str(payload.get("sandbox_mode", "default")),
-                    reasoning_effort=str(payload.get("reasoning_effort", "default")),
+                    reasoning_effort=str(payload.get("reasoning_effort", DEFAULT_REASONING_EFFORT)),
                 )
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -5414,7 +5445,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     model=str(payload.get("model", "default")),
                     sandbox=str(payload.get("sandbox", "default")),
                     approval=str(payload.get("approval", "default")),
-                    reasoning_effort=str(payload.get("reasoning_effort", "default")),
+                    reasoning_effort=str(payload.get("reasoning_effort", DEFAULT_REASONING_EFFORT)),
                     lease_id=str(payload.get("lease_id", "")),
                     owner_kind=str(payload.get("owner_kind", "mobile")),
                     owner_label=str(payload.get("owner_label", "Mobile")),
@@ -5632,7 +5663,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     model=str(payload.get("model", "default")),
                     sandbox=str(payload.get("sandbox", "default")),
                     approval=str(payload.get("approval", "default")),
-                    reasoning_effort=str(payload.get("reasoning_effort", "default")),
+                    reasoning_effort=str(payload.get("reasoning_effort", DEFAULT_REASONING_EFFORT)),
                 )
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)

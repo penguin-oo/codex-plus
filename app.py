@@ -73,13 +73,17 @@ CODEX_API_ENV_KEY_NAMES = (
     OPENAI_COMPAT_ENV_KEY_NAME,
 )
 OPENAI_API_KEY_ENTRY_SHOW = ""
-DEFAULT_PRIMARY_MODEL = "gpt-5.5"
+DEFAULT_PRIMARY_MODEL = "gpt-5.6-sol"
 DEFAULT_LAUNCH_MODEL = DEFAULT_PRIMARY_MODEL
 DEFAULT_LAUNCH_APPROVAL = "never"
 DEFAULT_LAUNCH_SANDBOX = "danger-full-access"
+DEFAULT_LAUNCH_REASONING_EFFORT = "max"
 DEFAULT_LAUNCH_ADMIN = False
 FALLBACK_MODEL_OPTIONS = (
     DEFAULT_PRIMARY_MODEL,
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",
     "gpt-5.2",
@@ -99,6 +103,7 @@ def default_launch_options() -> dict[str, str]:
         "model": DEFAULT_LAUNCH_MODEL,
         "approval": DEFAULT_LAUNCH_APPROVAL,
         "sandbox": DEFAULT_LAUNCH_SANDBOX,
+        "reasoning_effort": DEFAULT_LAUNCH_REASONING_EFFORT,
     }
 
 
@@ -928,7 +933,7 @@ def refresh_openai_compatible_models_from_upstream(
 
     Auto-sync + manual-extras semantics: the upstream list becomes the base,
     then any entries in `openai_manual_extra_models` (e.g. unlisted models like
-    `gpt-5.5`) are appended on top. Network or HTTP errors fall back to the
+    `gpt-5.6-luna`) are appended on top. Network or HTTP errors fall back to the
     current saved settings.
     """
     settings = token_pool_settings.load_backend_settings(settings_file)
@@ -1487,7 +1492,7 @@ class SessionManagerApp:
         self.model_var = tk.StringVar(value=launch_defaults["model"])
         self.approval_var = tk.StringVar(value=launch_defaults["approval"])
         self.sandbox_var = tk.StringVar(value=launch_defaults["sandbox"])
-        self.reasoning_effort_var = tk.StringVar(value="default")
+        self.reasoning_effort_var = tk.StringVar(value=launch_defaults["reasoning_effort"])
         self.search_var = tk.BooleanVar(value=False)
         self.admin_var = tk.BooleanVar(value=DEFAULT_LAUNCH_ADMIN)
         self.show_last_text_var = tk.BooleanVar(value=True)
@@ -1532,7 +1537,7 @@ class SessionManagerApp:
 
         ttk.Label(launch, text="Reasoning").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
         self.reasoning_box = ttk.Combobox(launch, textvariable=self.reasoning_effort_var, state="readonly", width=10)
-        self.reasoning_box["values"] = ("default", "low", "medium", "high", "xhigh")
+        self.reasoning_box["values"] = ("max", "default", "low", "medium", "high", "xhigh")
         self.reasoning_box.grid(row=2, column=1, sticky="w", pady=(8, 0))
         self.search_check = ttk.Checkbutton(launch, text="Search", variable=self.search_var)
         self.search_check.grid(row=2, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
@@ -2044,7 +2049,7 @@ class SessionManagerApp:
         settings_loader = getattr(self, "_reload_backend_settings", None)
         settings = settings_loader() if callable(settings_loader) else getattr(self, "backend_settings", {})
         if isinstance(settings, dict) and settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
-            openai_models = unique_model_ids(settings.get("openai_models", []))
+            openai_models = unique_model_ids([DEFAULT_PRIMARY_MODEL, *unique_model_ids(settings.get("openai_models", []))])
             saved_openai_model = str(settings.get("openai_model", "")).strip()
             if saved_openai_model and saved_openai_model not in openai_models:
                 openai_models.insert(0, saved_openai_model)
@@ -2321,7 +2326,7 @@ class SessionManagerApp:
             model = launch_defaults["model"]
             approval = launch_defaults["approval"]
             sandbox = launch_defaults["sandbox"]
-            reasoning = "default"
+            reasoning = launch_defaults["reasoning_effort"]
             search_enabled = False
         else:
             model = self.model_var.get().strip()
@@ -2367,7 +2372,15 @@ class SessionManagerApp:
         allowed_models = unique_model_ids(settings.get("openai_models", []))
         for candidate in candidates:
             clean_candidate = str(candidate).strip()
-            if clean_candidate and clean_candidate != "default" and (not allowed_models or clean_candidate in allowed_models):
+            if (
+                clean_candidate
+                and clean_candidate != "default"
+                and (
+                    clean_candidate == DEFAULT_PRIMARY_MODEL
+                    or not allowed_models
+                    or clean_candidate in allowed_models
+                )
+            ):
                 return clean_candidate
         configured_model = str(settings.get("openai_model", "")).strip()
         if configured_model and (not allowed_models or configured_model in allowed_models):

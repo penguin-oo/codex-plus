@@ -1,6 +1,9 @@
 package com.penguinoo.codexmobile;
 
 public final class ChatHeaderModel {
+    private static final String DEFAULT_MODEL = "gpt-5.6-sol";
+    private static final String DEFAULT_REASONING = "max";
+
     private ChatHeaderModel() {
     }
 
@@ -13,10 +16,10 @@ public final class ChatHeaderModel {
                 primaryLine = session.cwd;
             }
         }
-        String model = session == null || session.model == null || session.model.isEmpty() ? "default" : session.model;
+        String model = session == null || session.model == null || session.model.isEmpty() ? DEFAULT_MODEL : session.model;
         String approval = session == null || session.approvalPolicy == null || session.approvalPolicy.isEmpty() ? "default" : session.approvalPolicy;
         String sandbox = session == null || session.sandboxMode == null || session.sandboxMode.isEmpty() ? "default" : session.sandboxMode;
-        String reasoning = session == null || session.reasoningEffort == null || session.reasoningEffort.isEmpty() ? "default" : session.reasoningEffort;
+        String reasoning = session == null || session.reasoningEffort == null || session.reasoningEffort.isEmpty() ? DEFAULT_REASONING : session.reasoningEffort;
         String proxy = proxySummary == null || proxySummary.isEmpty() ? "default" : proxySummary;
         String settingsLine = "Model " + model
                 + " | Approval " + approval

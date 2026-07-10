@@ -16,6 +16,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class NewChatActivity extends AppCompatActivity {
+    private static final String DEFAULT_MODEL = "gpt-5.6-sol";
+    private static final String DEFAULT_REASONING = "max";
+
     public static final String EXTRA_PORTAL_URL = "portal_url";
     public static final String EXTRA_MODELS = "models";
     public static final String EXTRA_APPROVALS = "approvals";
@@ -51,10 +54,10 @@ public final class NewChatActivity extends AppCompatActivity {
         }
 
         binding.cwdInput.setText(getIntent().getStringExtra(EXTRA_DEFAULT_CWD));
-        setupSpinner(binding.modelSpinner, getIntent().getStringArrayListExtra(EXTRA_MODELS), defaultValues("default"));
+        setupSpinner(binding.modelSpinner, getIntent().getStringArrayListExtra(EXTRA_MODELS), defaultValues(DEFAULT_MODEL, "default"));
         setupSpinner(binding.approvalSpinner, getIntent().getStringArrayListExtra(EXTRA_APPROVALS), defaultValues("default", "on-request", "never"));
         setupSpinner(binding.sandboxSpinner, getIntent().getStringArrayListExtra(EXTRA_SANDBOXES), defaultValues("default", "workspace-write", "danger-full-access"));
-        setupSpinner(binding.reasoningSpinner, getIntent().getStringArrayListExtra(EXTRA_REASONINGS), defaultValues("default", "low", "medium", "high", "xhigh"));
+        setupSpinner(binding.reasoningSpinner, getIntent().getStringArrayListExtra(EXTRA_REASONINGS), defaultValues(DEFAULT_REASONING, "default", "low", "medium", "high", "xhigh"));
         binding.browseCwdButton.setOnClickListener(view -> browseFolders(textValue(binding.cwdInput)));
         binding.createChatButton.setOnClickListener(view -> createChat());
     }

@@ -15,6 +15,8 @@ import java.util.Date;
 import java.util.List;
 
 public final class SessionListAdapter extends RecyclerView.Adapter<SessionListAdapter.SessionViewHolder> {
+    private static final String DEFAULT_MODEL = "gpt-5.6-sol";
+
     public interface OnSessionClickListener {
         void onSessionClick(SessionSummary session);
     }
@@ -62,7 +64,7 @@ public final class SessionListAdapter extends RecyclerView.Adapter<SessionListAd
             binding.titleText.setText(SessionCollections.displayTitle(session));
             binding.cwdText.setText(SessionCollections.primarySubtitle(session));
             String time = session.timestamp > 0 ? dateFormat.format(new Date(session.timestamp * 1000L)) : "-";
-            binding.metaText.setText(time + "  |  " + safeValue(session.model, "default"));
+            binding.metaText.setText(time + "  |  " + safeValue(session.model, DEFAULT_MODEL));
             binding.replyingBadgeText.setVisibility(session.isReplying ? View.VISIBLE : View.GONE);
             binding.getRoot().setBackgroundResource(session.isReplying ? R.drawable.bg_card_active : R.drawable.bg_card);
             if (session.note != null && !session.note.isEmpty() && session.cwd != null && !session.cwd.isEmpty()) {

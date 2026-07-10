@@ -305,7 +305,7 @@ public final class AccountCenterDialogSupport {
         EditText modelInput = new EditText(activity);
         modelInput.setHint(R.string.hint_openai_model);
         String initialModel = backend.openaiModel == null || backend.openaiModel.trim().isEmpty()
-                ? (backend.openaiModels.isEmpty() ? "gpt-5.5" : backend.openaiModels.get(0))
+                ? (backend.openaiModels.isEmpty() ? "gpt-5.6-sol" : backend.openaiModels.get(0))
                 : backend.openaiModel.trim();
         modelInput.setText(initialModel);
         modelInput.setSelection(modelInput.getText().length());

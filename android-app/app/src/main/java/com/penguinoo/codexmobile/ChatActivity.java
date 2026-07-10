@@ -45,6 +45,8 @@ import java.util.concurrent.Executors;
 public final class ChatActivity extends AppCompatActivity {
     public static final String EXTRA_PORTAL_URL = "portal_url";
     public static final String EXTRA_SESSION_ID = "session_id";
+    private static final String DEFAULT_MODEL = "gpt-5.6-sol";
+    private static final String DEFAULT_REASONING = "max";
     private static final long HEARTBEAT_INTERVAL_MS = 10_000L;
     private static final int MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
@@ -771,10 +773,10 @@ public final class ChatActivity extends AppCompatActivity {
         int padding = dpToPx(18);
         container.setPadding(padding, padding, padding, 0);
 
-        Spinner modelSpinner = buildSettingsSpinner(sessionModelOptions, effectiveSessionValue(currentSession.model));
+        Spinner modelSpinner = buildSettingsSpinner(sessionModelOptions, effectiveModelValue(currentSession.model));
         Spinner approvalSpinner = buildSettingsSpinner(sessionApprovalOptions, effectiveSessionValue(currentSession.approvalPolicy));
         Spinner sandboxSpinner = buildSettingsSpinner(sessionSandboxOptions, effectiveSessionValue(currentSession.sandboxMode));
-        Spinner reasoningSpinner = buildSettingsSpinner(sessionReasoningOptions, effectiveSessionValue(currentSession.reasoningEffort));
+        Spinner reasoningSpinner = buildSettingsSpinner(sessionReasoningOptions, effectiveReasoningValue(currentSession.reasoningEffort));
 
         container.addView(buildSettingsLabel(R.string.label_model));
         container.addView(modelSpinner);
@@ -845,6 +847,14 @@ public final class ChatActivity extends AppCompatActivity {
 
     private String effectiveSessionValue(String value) {
         return value == null || value.isEmpty() ? "default" : value;
+    }
+
+    private String effectiveModelValue(String value) {
+        return value == null || value.isEmpty() ? DEFAULT_MODEL : value;
+    }
+
+    private String effectiveReasoningValue(String value) {
+        return value == null || value.isEmpty() ? DEFAULT_REASONING : value;
     }
 
     private int dpToPx(int value) {
