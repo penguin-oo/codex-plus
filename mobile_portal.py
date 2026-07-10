@@ -61,6 +61,7 @@ APP_DIR = Path(__file__).resolve().parent
 TOKEN_POOL_PROXY_STATE_FILE = CODEX_HOME / "token_pool_proxy_state.json"
 CODEX_BIN = "codex.cmd" if os.name == "nt" else "codex"
 RUNNING_JOB_GRACE_SECONDS = 8
+INTERRUPTED_REPLY_MESSAGE = "Reply interrupted. The response may be incomplete."
 DERIVED_SESSION_FILE_MARKERS = (
     ".context-overflow-backup-",
     ".restore-current-backup-",
@@ -3094,7 +3095,13 @@ class JobRunner:
                     job["status"] = status
                     job["session_id"] = session_id
                     job["last_message"] = last_message or str(job.get("last_message", ""))
-                    job["error"] = error
+                    if status == "failed":
+                        diagnostic_error = str(job.get("diagnostic_error", "")).strip() or error.strip()
+                        job["error"] = INTERRUPTED_REPLY_MESSAGE
+                        if diagnostic_error:
+                            job["diagnostic_error"] = diagnostic_error
+                    else:
+                        job["error"] = error
                     job["finished_at"] = now_ts()
             if release_session:
                 self.active_sessions.discard(release_session)
@@ -3357,6 +3364,19 @@ class JobRunner:
 
     def _handle_codex_event(self, job_id: str, event: dict[str, object], detected_session_id: str) -> tuple[str, bool]:
         event_type = str(event.get("type", ""))
+        if event_type == "error":
+            error_message = str(event.get("message", "")).strip()
+            raw_error = event.get("error")
+            if not error_message and isinstance(raw_error, dict):
+                error_message = str(raw_error.get("message", "")).strip()
+            if error_message:
+                with self.lock:
+                    job = self.jobs.get(job_id)
+                    if job:
+                        job["diagnostic_error"] = error_message
+                        job["heartbeat_at"] = now_ts()
+            return detected_session_id, False
+
         if event_type == "thread.started":
             next_session_id = str(event.get("thread_id", detected_session_id))
             opening_prompt = ""
@@ -3481,7 +3501,13 @@ class JobRunner:
             return
         if self._job_is_alive_locked(job):
             return
-        self.jobs.pop(job_id, None)
+        partial_text = str(job.get("last_message", "")).strip() or str(job.get("live_text", "")).strip()
+        job["status"] = "failed"
+        job["last_message"] = partial_text
+        job["error"] = INTERRUPTED_REPLY_MESSAGE
+        job["diagnostic_error"] = str(job.get("diagnostic_error", "")).strip() or "Codex process ended unexpectedly."
+        job["finished_at"] = now_ts()
+        job["pid"] = 0
         self.active_sessions.discard(session_id)
 
     def _job_is_alive_locked(self, job: dict[str, object]) -> bool:
