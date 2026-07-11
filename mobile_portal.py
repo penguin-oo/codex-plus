@@ -1353,7 +1353,7 @@ def build_codex_subprocess_env(
     backend_settings = token_pool_settings.load_backend_settings(backend_settings_file)
     proxy_settings = load_proxy_settings(settings_file)
     if backend_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
-        proxy_preference = str(backend_settings.get("proxy_preference", "direct")).strip()
+        proxy_preference = token_pool_settings.effective_openai_proxy_preference(backend_settings)
         if proxy_preference == "proxy":
             env = apply_proxy_settings_to_env(base_env, proxy_settings)
         else:
@@ -1571,9 +1571,6 @@ def openai_compatible_proxy_config_fingerprint_for_settings(settings: dict[str, 
 
 
 def openai_compatible_requires_local_proxy(settings: dict[str, object]) -> bool:
-    proxy_preference = str(settings.get("proxy_preference", "")).strip()
-    if proxy_preference == "proxy":
-        return True
     return str(settings.get("openai_protocol", "")).strip() == token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS
 
 
@@ -2149,6 +2146,69 @@ class CodexDataStore:
             return 0, ""
         return latest_ts, latest_message
 
+    def latest_partial_assistant_message(self, session_id: str, since_ts: int = 0) -> tuple[int, str]:
+        session_file = self.find_session_file(session_id)
+        if not session_file:
+            return 0, ""
+        latest_ts = 0
+        latest_message = ""
+        has_final_answer = False
+        try:
+            with open(session_file, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = iso_to_ts(str(obj.get("timestamp", "")))
+                    if since_ts and ts and ts < since_ts:
+                        continue
+                    obj_type = str(obj.get("type", ""))
+                    payload = obj.get("payload", {})
+                    if not isinstance(payload, dict):
+                        continue
+                    if obj_type == "event_msg":
+                        event_type = str(payload.get("type", ""))
+                        if event_type == "agent_message":
+                            message = sanitize_assistant_message_text(str(payload.get("message", "")))
+                            if message:
+                                latest_ts = ts
+                                latest_message = message
+                        elif event_type == "task_complete":
+                            final_message = payload.get("last_agent_message")
+                            if isinstance(final_message, str) and final_message.strip():
+                                has_final_answer = True
+                        continue
+                    if obj_type != "response_item" or payload.get("type") != "message":
+                        continue
+                    role = str(payload.get("role", ""))
+                    if role == "user":
+                        latest_ts = 0
+                        latest_message = ""
+                        has_final_answer = False
+                        continue
+                    if role != "assistant":
+                        continue
+                    content = payload.get("content", [])
+                    if not isinstance(content, list):
+                        continue
+                    message = sanitize_assistant_message_text(flatten_message_content(content))
+                    if payload.get("phase") == "final_answer":
+                        if message:
+                            has_final_answer = True
+                        continue
+                    if message:
+                        latest_ts = ts
+                        latest_message = message
+        except OSError:
+            return 0, ""
+        if has_final_answer:
+            return 0, ""
+        return latest_ts, latest_message
+
     def extract_session_details(self, session_file: str) -> dict[str, str]:
         if not session_file:
             return {}
@@ -2266,7 +2326,7 @@ class CodexDataStore:
             if not current_turn:
                 return
             if not bool(current_turn.get("has_final_answer")):
-                fallback_text = explicit_text.strip()
+                fallback_text = explicit_text.strip() or str(current_turn.get("last_assistant_text", "")).strip()
                 fallback_ts = int(current_turn.get("last_assistant_ts", 0) or task_complete_ts)
                 if fallback_text:
                     messages.append(
@@ -2284,6 +2344,7 @@ class CodexDataStore:
             current_turn = {
                 "has_final_answer": False,
                 "last_assistant_ts": 0,
+                "last_assistant_text": "",
                 "saw_assistant_progress": False,
             }
 
@@ -2323,7 +2384,14 @@ class CodexDataStore:
                             payload = obj.get("payload", {})
                             if not isinstance(payload, dict):
                                 continue
-                            if str(payload.get("type", "")) == "task_complete":
+                            event_type = str(payload.get("type", ""))
+                            if event_type == "agent_message" and current_turn is not None:
+                                progress_text = sanitize_assistant_message_text(str(payload.get("message", "")))
+                                if progress_text:
+                                    current_turn["last_assistant_ts"] = ts
+                                    current_turn["last_assistant_text"] = progress_text
+                                    current_turn["saw_assistant_progress"] = True
+                            elif event_type == "task_complete":
                                 raw_last_message = payload.get("last_agent_message")
                                 explicit_text = raw_last_message if isinstance(raw_last_message, str) else ""
                                 flush_pending_assistant(task_complete_ts=ts, explicit_text=explicit_text)
@@ -2359,6 +2427,7 @@ class CodexDataStore:
                         if payload.get("phase") != "final_answer":
                             if current_turn is not None:
                                 current_turn["last_assistant_ts"] = ts
+                                current_turn["last_assistant_text"] = sanitize_assistant_message_text(text)
                                 current_turn["saw_assistant_progress"] = True
                             continue
                         if current_turn is not None:
@@ -2746,6 +2815,7 @@ class JobRunner:
             raise ValueError("Job id is required.")
         pid = 0
         session_id = ""
+        created_at = 0
         with self.lock:
             job = self.jobs.get(clean_job_id)
             if not job:
@@ -2754,15 +2824,27 @@ class JobRunner:
                 raise RuntimeError("Job is not running.")
             pid = int(job.get("pid", 0) or 0)
             session_id = str(job.get("session_id", ""))
+            created_at = int(job.get("created_at", 0) or 0)
         if pid > 0:
             self._terminate_pid(pid)
+        partial_text = ""
+        if session_id:
+            _partial_ts, partial_text = self.data_store.latest_partial_assistant_message(
+                session_id,
+                since_ts=created_at,
+            )
         with self.lock:
             job = self.jobs.get(clean_job_id)
             if not job:
                 raise FileNotFoundError("Job not found.")
             if str(job.get("status", "")) == "running":
-                if not str(job.get("last_message", "")).strip():
-                    job["last_message"] = str(job.get("live_text", "")).strip()
+                retained_text = (
+                    str(job.get("last_message", "")).strip()
+                    or str(job.get("live_text", "")).strip()
+                    or partial_text
+                )
+                job["last_message"] = retained_text
+                job["live_text"] = retained_text
                 job["status"] = "cancelled"
                 job["error"] = ""
                 job["finished_at"] = now_ts()
@@ -3081,6 +3163,15 @@ class JobRunner:
         error: str = "",
         release_session: str = "",
     ) -> None:
+        recovered_partial = ""
+        if status == "failed" and session_id and not last_message.strip():
+            with self.lock:
+                existing_job = self.jobs.get(job_id, {})
+                created_at = int(existing_job.get("created_at", 0) or 0)
+            _partial_ts, recovered_partial = self.data_store.latest_partial_assistant_message(
+                session_id,
+                since_ts=created_at,
+            )
         with self.lock:
             job = self.jobs.get(job_id)
             if job:
@@ -3094,7 +3185,15 @@ class JobRunner:
                 else:
                     job["status"] = status
                     job["session_id"] = session_id
-                    job["last_message"] = last_message or str(job.get("last_message", ""))
+                    retained_message = (
+                        last_message.strip()
+                        or str(job.get("last_message", "")).strip()
+                        or str(job.get("live_text", "")).strip()
+                        or recovered_partial
+                    )
+                    job["last_message"] = retained_message
+                    if retained_message and not str(job.get("live_text", "")).strip():
+                        job["live_text"] = retained_message
                     if status == "failed":
                         diagnostic_error = str(job.get("diagnostic_error", "")).strip() or error.strip()
                         job["error"] = INTERRUPTED_REPLY_MESSAGE
@@ -3442,6 +3541,10 @@ class JobRunner:
             item = event.get(key)
             if not isinstance(item, dict):
                 continue
+            if key == "payload" and str(item.get("type", "")) == "agent_message":
+                message = sanitize_assistant_message_text(str(item.get("message", "")))
+                if message:
+                    return message
             item_text = str(item.get("text", "")).strip()
             if item_text:
                 return item_text
@@ -3502,8 +3605,14 @@ class JobRunner:
         if self._job_is_alive_locked(job):
             return
         partial_text = str(job.get("last_message", "")).strip() or str(job.get("live_text", "")).strip()
+        if not partial_text:
+            _partial_ts, partial_text = self.data_store.latest_partial_assistant_message(
+                session_id,
+                since_ts=int(job.get("created_at", 0) or 0),
+            )
         job["status"] = "failed"
         job["last_message"] = partial_text
+        job["live_text"] = partial_text
         job["error"] = INTERRUPTED_REPLY_MESSAGE
         job["diagnostic_error"] = str(job.get("diagnostic_error", "")).strip() or "Codex process ended unexpectedly."
         job["finished_at"] = now_ts()

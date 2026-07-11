@@ -5,8 +5,14 @@ import mobile_portal
 
 
 class FakeDataStore:
+    def __init__(self, partial_message: str = "") -> None:
+        self.partial_message = partial_message
+
     def latest_task_complete_message(self, session_id: str, since_ts: int = 0) -> tuple[int, str]:
         return 0, ""
+
+    def latest_partial_assistant_message(self, session_id: str, since_ts: int = 0) -> tuple[int, str]:
+        return mobile_portal.now_ts(), self.partial_message
 
 
 class MobileJobStateTests(unittest.TestCase):
@@ -80,6 +86,54 @@ class MobileJobStateTests(unittest.TestCase):
         self.assertEqual("running", job["status"])
         self.assertEqual("", job["error"])
         self.assertEqual("insufficient quota", job["diagnostic_error"])
+
+    def test_agent_message_event_updates_live_partial_reply(self) -> None:
+        runner, session_id, job_id = self.make_running_job()
+        runner.jobs[job_id]["live_text"] = ""
+        runner.jobs[job_id]["last_message"] = ""
+
+        detected_session_id, completion_seen = runner._handle_codex_event(
+            job_id,
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "partial reply from commentary",
+                    "phase": "commentary",
+                },
+            },
+            session_id,
+        )
+
+        job = runner.jobs[job_id]
+        self.assertEqual(session_id, detected_session_id)
+        self.assertFalse(completion_seen)
+        self.assertEqual("partial reply from commentary", job["live_text"])
+        self.assertEqual("partial reply from commentary", job["last_message"])
+
+    def test_cancel_job_recovers_partial_reply_from_rollout(self) -> None:
+        runner = mobile_portal.JobRunner(FakeDataStore("rollout partial reply"))
+        session_id = "session-1"
+        job_id = "job-1"
+        runner.jobs[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "session_id": session_id,
+            "created_at": mobile_portal.now_ts(),
+            "heartbeat_at": mobile_portal.now_ts(),
+            "pid": 123,
+            "live_text": "",
+            "last_message": "",
+            "error": "",
+        }
+        runner.active_sessions.add(session_id)
+
+        with mock.patch.object(runner, "_terminate_pid"):
+            result = runner.cancel_job(job_id)
+
+        self.assertEqual("cancelled", result["status"])
+        self.assertEqual("rollout partial reply", result["live_text"])
+        self.assertEqual("rollout partial reply", result["last_message"])
 
     def test_quota_telemetry_at_100_percent_does_not_finish_job(self) -> None:
         runner, session_id, job_id = self.make_running_job()

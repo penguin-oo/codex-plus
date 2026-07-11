@@ -52,6 +52,23 @@ def get_active_proxy_preference() -> str:
     return _ACTIVE_PROXY_PREFERENCE
 
 
+def effective_openai_proxy_preference(settings: dict[str, object]) -> str:
+    top_level = str(settings.get('proxy_preference', '')).strip()
+    if top_level in ('direct', 'proxy'):
+        return top_level
+    active_id = str(settings.get('active_openai_preset_id', '')).strip()
+    presets = settings.get('openai_presets', [])
+    if isinstance(presets, list) and active_id:
+        for preset in presets:
+            if not isinstance(preset, dict) or str(preset.get('id', '')).strip() != active_id:
+                continue
+            preset_preference = str(preset.get('proxy_preference', '')).strip()
+            if preset_preference in ('direct', 'proxy'):
+                return preset_preference
+            break
+    return 'direct'
+
+
 def _normalize_openai_models(raw_models: object) -> list[str]:
     if not isinstance(raw_models, list):
         return []

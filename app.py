@@ -992,6 +992,13 @@ def apply_backend_mode_settings(
 ) -> dict[str, object]:
     clean_mode = str(backend_mode).strip() or token_pool_settings.BACKEND_MODE_CODEX_AUTH
     if clean_mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
+        existing = token_pool_settings.load_backend_settings(settings_file)
+        active_preset_id = str(existing.get("active_openai_preset_id", "")).strip()
+        active_preset = _find_openai_preset(existing, active_preset_id) if active_preset_id else {}
+        use_active_skip_preset = (
+            isinstance(active_preset, dict)
+            and bool(active_preset.get("skip_validation", False))
+        )
         return save_openai_compatible_backend_settings(
             settings_file=settings_file,
             token_dir=token_dir,
@@ -1000,6 +1007,10 @@ def apply_backend_mode_settings(
             base_url=openai_base_url,
             api_key=openai_api_key,
             model=openai_model,
+            preset_id=active_preset_id if use_active_skip_preset else "",
+            preset_name=str(active_preset.get("name", "")).strip() if use_active_skip_preset else "",
+            proxy_preference=str(active_preset.get("proxy_preference", "direct")) if use_active_skip_preset else "direct",
+            protocol_override=openai_protocol,
         )
     updated = token_pool_settings.save_backend_settings(
         backend_mode=clean_mode,
@@ -1313,15 +1324,12 @@ def _is_proxy_needed_for_openai_compatible(settings: dict[str, object]) -> bool:
     """
     Detect if proxy is needed for openai_compatible mode.
 
-    Proxy is needed when a preset explicitly requires it, or when there is a
-    protocol mismatch that needs translation.
+    The local proxy is only needed for a protocol mismatch. Network proxy
+    selection is handled independently through the launch environment.
 
     Returns:
         True if proxy is needed, False for direct connection
     """
-    proxy_preference = str(settings.get("proxy_preference", "")).strip()
-    if proxy_preference == "proxy":
-        return True
     upstream_protocol = str(settings.get("openai_protocol", "")).strip()
     return upstream_protocol == token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS
 
@@ -2463,7 +2471,7 @@ class SessionManagerApp:
         settings = self._token_pool_settings()
         mode = settings.get("backend_mode", "")
         if mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
-            pref = str(settings.get("proxy_preference", "direct")).strip()
+            pref = token_pool_settings.effective_openai_proxy_preference(settings)
         else:
             # For token_pool and codex_auth modes, use UI checkbox
             pref = "proxy" if self.use_proxy_var.get() else "direct"
@@ -2535,7 +2543,7 @@ class SessionManagerApp:
         settings = self._token_pool_settings()
         mode = settings.get("backend_mode", "")
         if mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
-            pref = str(settings.get("proxy_preference", "direct")).strip()
+            pref = token_pool_settings.effective_openai_proxy_preference(settings)
         else:
             # For token_pool and codex_auth modes, use UI checkbox
             pref = "proxy" if self.use_proxy_var.get() else "direct"
@@ -3355,7 +3363,7 @@ class SessionManagerApp:
                     openai_api_key=openai_api_key_var.get(),
                     openai_model=openai_model_var.get(),
                     openai_models=settings.get("openai_models", []),
-                    openai_protocol=str(settings.get("openai_protocol", "")),
+                    openai_protocol=openai_protocol_var.get().strip(),
                 )
             except Exception as exc:
                 messagebox.showerror("Backend Mode", str(exc), parent=dialog)
