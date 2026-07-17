@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import window_runtime
 
@@ -232,6 +233,28 @@ class WindowRuntimeTests(unittest.TestCase):
 
     def test_current_process_is_reported_alive(self) -> None:
         self.assertTrue(window_runtime.is_process_alive(os.getpid()))
+
+    @unittest.skipUnless(os.name == "nt", "junction fallback is Windows-specific")
+    def test_directory_links_fall_back_to_cmd_when_native_creation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            base_home = self.make_base_home(root)
+            private_home = root / "private-home"
+            private_home.mkdir()
+            with (
+                mock.patch.object(
+                    window_runtime,
+                    "_create_windows_junction",
+                    side_effect=OSError("native junction unavailable"),
+                ),
+                mock.patch.object(
+                    window_runtime,
+                    "_create_windows_junctions_with_cmd",
+                ) as fallback,
+            ):
+                window_runtime._create_directory_links(base_home, private_home)
+
+            fallback.assert_called_once()
 
     def test_runtime_powershell_wrapper_binds_home_pid_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

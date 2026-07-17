@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import time
 import uuid
@@ -35,11 +36,9 @@ SHARED_DIRECTORY_NAMES = (
     "cache",
     "generated_images",
     "log",
-    "logs",
     "node_repl",
     "sessions",
     "skills",
-    "tmp",
     "plugins",
     "rules",
     "memories",
@@ -52,6 +51,8 @@ SHARED_FILE_NAMES = (
     "session_index.jsonl",
 )
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+FSCTL_SET_REPARSE_POINT = 0x000900A4
 
 
 class WindowRuntimeError(RuntimeError):
@@ -287,24 +288,103 @@ def _share_files(base_home: Path, private_home: Path) -> None:
         os.link(source, destination)
 
 
-def _create_directory_links(base_home: Path, private_home: Path) -> None:
-    pairs = [
-        (private_home / name, base_home / name)
-        for name in SHARED_DIRECTORY_NAMES
-        if (base_home / name).is_dir()
+def _create_windows_junction(link: Path, target: Path) -> None:
+    """Create a directory junction without starting a shell process."""
+    import ctypes
+    from ctypes import wintypes
+
+    target_text = os.fspath(_absolute_path(target))
+    if target_text.startswith("\\\\"):
+        substitute_name = "\\??\\UNC" + target_text[1:]
+    else:
+        substitute_name = "\\??\\" + target_text
+    substitute_bytes = substitute_name.encode("utf-16-le")
+    print_bytes = target_text.encode("utf-16-le")
+    path_buffer = substitute_bytes + b"\x00\x00" + print_bytes + b"\x00\x00"
+    reparse_buffer = struct.pack(
+        "<LHHHHHH",
+        IO_REPARSE_TAG_MOUNT_POINT,
+        8 + len(path_buffer),
+        0,
+        0,
+        len(substitute_bytes),
+        len(substitute_bytes) + 2,
+        len(print_bytes),
+    ) + path_buffer
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
     ]
-    if not pairs:
-        return
-    if os.name != "nt":
-        for link, target in pairs:
-            os.symlink(target, link, target_is_directory=True)
-        return
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    generic_write = 0x40000000
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    link.mkdir()
+    handle = kernel32.CreateFileW(
+        os.fspath(link),
+        generic_write,
+        0,
+        None,
+        open_existing,
+        file_flag_open_reparse_point | file_flag_backup_semantics,
+        None,
+    )
+    if handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        link.rmdir()
+        raise ctypes.WinError(error_code)
+    try:
+        input_buffer = ctypes.create_string_buffer(reparse_buffer)
+        bytes_returned = wintypes.DWORD()
+        succeeded = kernel32.DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            input_buffer,
+            len(reparse_buffer),
+            None,
+            0,
+            ctypes.byref(bytes_returned),
+            None,
+        )
+        if not succeeded:
+            raise ctypes.WinError(ctypes.get_last_error())
+    except Exception:
+        kernel32.CloseHandle(handle)
+        link.rmdir()
+        raise
+    kernel32.CloseHandle(handle)
+
+
+def _create_windows_junctions_with_cmd(pairs: list[tuple[Path, Path]], private_home: Path) -> None:
     batch_file = private_home.parent / "create-directory-links.cmd"
     lines = ["@echo off"]
     for link, target in pairs:
         link_text = os.fspath(link).replace("%", "%%")
         target_text = os.fspath(target).replace("%", "%%")
-        lines.append(f'mklink /J "{link_text}" "{target_text}" || exit /b 1')
+        lines.append(f'mklink /J "{link_text}" "{target_text}" >nul || exit /b 1')
     batch_file.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
     try:
         result = subprocess.run(
@@ -318,6 +398,30 @@ def _create_directory_links(base_home: Path, private_home: Path) -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise WindowRuntimeError(f"Unable to create shared runtime directories: {detail}")
+
+
+def _create_directory_links(base_home: Path, private_home: Path) -> None:
+    pairs = [
+        (private_home / name, base_home / name)
+        for name in SHARED_DIRECTORY_NAMES
+        if (base_home / name).is_dir()
+    ]
+    if not pairs:
+        return
+    if os.name != "nt":
+        for link, target in pairs:
+            os.symlink(target, link, target_is_directory=True)
+        return
+    created: list[Path] = []
+    try:
+        for link, target in pairs:
+            _create_windows_junction(link, target)
+            created.append(link)
+        return
+    except OSError:
+        for link in reversed(created):
+            os.rmdir(link)
+    _create_windows_junctions_with_cmd(pairs, private_home)
 
 
 def _baseline_installation_id(base_home: Path, explicit_id: str) -> str:
