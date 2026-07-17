@@ -1,0 +1,317 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import app
+import token_pool_settings
+import window_runtime
+
+
+class FakeVar:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def get(self) -> object:
+        return self.value
+
+    def set(self, value: object) -> None:
+        self.value = value
+
+
+def make_manager() -> app.SessionManagerApp:
+    manager = object.__new__(app.SessionManagerApp)
+    manager.use_global_defaults_var = FakeVar(False)
+    manager.model_var = FakeVar("snapshot-model")
+    manager.approval_var = FakeVar("never")
+    manager.sandbox_var = FakeVar("danger-full-access")
+    manager.reasoning_effort_var = FakeVar("high")
+    manager.search_var = FakeVar(False)
+    manager.use_proxy_var = FakeVar(False)
+    manager.proxy_scheme_var = FakeVar("socks5h")
+    manager.proxy_host_var = FakeVar("127.0.0.1")
+    manager.proxy_port_var = FakeVar("7897")
+    manager.admin_var = FakeVar(False)
+    manager.status_var = FakeVar("")
+    return manager
+
+
+def make_runtime(root: Path, *, isolated: bool = True, session_id: str = "") -> window_runtime.WindowRuntime:
+    runtime_root = root / "window_profiles"
+    runtime_dir = runtime_root / "launch-test"
+    return window_runtime.WindowRuntime(
+        launch_id="launch-test",
+        runtime_root=runtime_root,
+        runtime_dir=runtime_dir,
+        codex_home=runtime_dir / "home" if isolated else root,
+        sqlite_home=root,
+        isolated=isolated,
+        session_id=session_id,
+    )
+
+
+def make_session(session_id: str = "session-test") -> app.SessionItem:
+    return app.SessionItem(
+        session_id=session_id,
+        ts=0,
+        text="",
+        note="",
+        history_count=1,
+        cwd="D:\\workspace",
+        model="snapshot-model",
+        approval_policy="never",
+        sandbox_mode="danger-full-access",
+        turn_id="",
+        session_file="",
+    )
+
+
+class DesktopWindowLaunchTests(unittest.TestCase):
+    def openai_settings(self) -> dict[str, object]:
+        return {
+            "backend_mode": token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+            "openai_base_url": "https://snapshot.invalid/v1",
+            "openai_api_key": "snapshot-key",
+            "openai_model": "snapshot-model",
+            "openai_models": ["snapshot-model"],
+            "openai_protocol": token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+            "proxy_preference": "direct",
+            "installation_id": "snapshot-installation",
+        }
+
+    def test_new_args_use_explicit_snapshot_without_reloading_settings(self) -> None:
+        manager = make_manager()
+        manager._token_pool_settings = mock.Mock(side_effect=AssertionError("settings reloaded"))
+        settings = self.openai_settings()
+
+        with mock.patch.object(
+            manager,
+            "_ensure_openai_compatible_launch_model_metadata",
+        ) as ensure_metadata:
+            args = manager._build_codex_new_args(settings)
+
+        self.assertIn("snapshot-model", args)
+        self.assertIn(
+            'model_providers.openai_compatible.base_url="https://snapshot.invalid/v1"',
+            args,
+        )
+        ensure_metadata.assert_called_once_with(settings, "snapshot-model")
+        manager._token_pool_settings.assert_not_called()
+
+    def test_terminal_command_binds_runtime_and_uses_same_snapshot(self) -> None:
+        manager = make_manager()
+        manager._token_pool_settings = mock.Mock(side_effect=AssertionError("settings reloaded"))
+        manager._resolve_terminal_codex_args = mock.Mock(side_effect=lambda args: args)
+        settings = self.openai_settings()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = make_runtime(root)
+
+            command = manager._build_terminal_ps_command(
+                "D:\\workspace",
+                ["codex.cmd", "-m", "snapshot-model"],
+                settings,
+                runtime,
+            )
+
+        self.assertIn("snapshot-key", command)
+        self.assertIn("$env:CODEX_HOME", command)
+        self.assertIn(str(runtime.codex_home), command)
+        self.assertIn("$env:CODEX_SQLITE_HOME", command)
+        self.assertIn("finally {", command)
+        manager._token_pool_settings.assert_not_called()
+
+    def test_runtime_isolated_for_non_auth_backends_only(self) -> None:
+        manager = make_manager()
+        with mock.patch.object(
+            app.window_runtime,
+            "prepare_window_runtime",
+            return_value=mock.sentinel.runtime,
+        ) as prepare:
+            auth_result = manager._prepare_window_runtime(
+                {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH},
+                session_id="auth-session",
+            )
+            custom_result = manager._prepare_window_runtime(
+                self.openai_settings(),
+                session_id="custom-session",
+            )
+
+        self.assertIs(mock.sentinel.runtime, auth_result)
+        self.assertIs(mock.sentinel.runtime, custom_result)
+        self.assertFalse(prepare.call_args_list[0].kwargs["isolate_home"])
+        self.assertEqual("", prepare.call_args_list[0].kwargs["installation_id"])
+        self.assertTrue(prepare.call_args_list[1].kwargs["isolate_home"])
+        self.assertEqual(
+            "snapshot-installation",
+            prepare.call_args_list[1].kwargs["installation_id"],
+        )
+
+    def test_new_chat_captures_settings_once_for_the_entire_launch(self) -> None:
+        manager = make_manager()
+        source_settings = self.openai_settings()
+        manager._token_pool_settings = mock.Mock(return_value=source_settings)
+        manager._ensure_backend_ready = mock.Mock()
+        manager._build_codex_new_args = mock.Mock(return_value=["codex.cmd"])
+        manager._prepare_window_runtime = mock.Mock(return_value=mock.sentinel.runtime)
+        manager._build_terminal_ps_command = mock.Mock(return_value="terminal-command")
+        manager._launch_terminal_with_runtime = mock.Mock()
+
+        with (
+            mock.patch.object(app.filedialog, "askdirectory", return_value="D:\\workspace"),
+            mock.patch.object(app, "launch_terminal_command"),
+        ):
+            manager.open_new_chat()
+
+        manager._token_pool_settings.assert_called_once_with()
+        captured = manager._ensure_backend_ready.call_args.args[0]
+        self.assertIs(captured, manager._build_codex_new_args.call_args.args[0])
+        self.assertIs(captured, manager._prepare_window_runtime.call_args.args[0])
+        self.assertIs(captured, manager._build_terminal_ps_command.call_args.args[2])
+        manager._prepare_window_runtime.assert_called_once_with(captured, session_id="")
+        manager._build_terminal_ps_command.assert_called_once_with(
+            "D:\\workspace",
+            ["codex.cmd"],
+            captured,
+            mock.sentinel.runtime,
+        )
+        manager._launch_terminal_with_runtime.assert_called_once_with(
+            "terminal-command",
+            mock.sentinel.runtime,
+        )
+
+    def test_duplicate_resume_is_reported_without_launching_terminal(self) -> None:
+        manager = make_manager()
+        item = make_session("session-locked")
+        manager._selected_session = mock.Mock(return_value=item)
+        manager._portal_owner = mock.Mock(return_value=None)
+        manager._token_pool_settings = mock.Mock(return_value=self.openai_settings())
+        manager._ensure_backend_ready = mock.Mock()
+        manager._build_codex_resume_args = mock.Mock(return_value=["codex.cmd"])
+        manager._prepare_window_runtime = mock.Mock(
+            side_effect=window_runtime.SessionAlreadyOpenError(item.session_id)
+        )
+        manager._build_terminal_ps_command = mock.Mock()
+        manager._launch_terminal_with_runtime = mock.Mock()
+
+        with (
+            mock.patch.object(app.messagebox, "showinfo") as showinfo,
+            mock.patch.object(app, "launch_terminal_command") as launch,
+        ):
+            manager.open_selected_admin()
+
+        showinfo.assert_called_once()
+        self.assertIn("already open", showinfo.call_args.args[1].lower())
+        manager._build_terminal_ps_command.assert_not_called()
+        manager._launch_terminal_with_runtime.assert_not_called()
+        launch.assert_not_called()
+
+    def test_terminal_launch_failure_cleans_runtime_immediately(self) -> None:
+        manager = make_manager()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = make_runtime(Path(temp_dir))
+            with (
+                mock.patch.object(
+                    app,
+                    "launch_terminal_command",
+                    side_effect=OSError("launch failed"),
+                ),
+                mock.patch.object(app.window_runtime, "cleanup_window_runtime") as cleanup,
+            ):
+                with self.assertRaisesRegex(OSError, "launch failed"):
+                    manager._launch_terminal_with_runtime("terminal-command", runtime)
+
+        cleanup.assert_called_once_with(runtime.runtime_dir, runtime.runtime_root)
+
+    def test_cleanup_failure_does_not_hide_terminal_launch_error(self) -> None:
+        manager = make_manager()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = make_runtime(Path(temp_dir))
+            with (
+                mock.patch.object(
+                    app,
+                    "launch_terminal_command",
+                    side_effect=OSError("original launch failure"),
+                ),
+                mock.patch.object(
+                    app.window_runtime,
+                    "cleanup_window_runtime",
+                    side_effect=window_runtime.WindowRuntimeError("cleanup failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "original launch failure"):
+                    manager._launch_terminal_with_runtime("terminal-command", runtime)
+
+    def test_switching_to_auth_restores_the_baseline_installation_id(self) -> None:
+        updated = {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH}
+        with (
+            mock.patch.object(
+                token_pool_settings,
+                "save_backend_settings",
+                return_value=updated,
+            ),
+            mock.patch.object(app, "_patch_image_generation_for_backend_mode"),
+            mock.patch.object(app, "_swap_installation_id_for_preset") as restore,
+        ):
+            result = app.apply_backend_mode_settings(
+                backend_mode=token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+            )
+
+        self.assertIs(updated, result)
+        restore.assert_called_once_with({})
+
+    def test_packaged_cleanup_mode_runs_without_starting_the_gui(self) -> None:
+        with (
+            mock.patch.object(
+                app.sys,
+                "argv",
+                [
+                    "CodexPlus.exe",
+                    "--window-runtime-cleanup",
+                    "--runtime-root",
+                    "runtime-root",
+                    "--runtime-dir",
+                    "runtime-dir",
+                ],
+            ),
+            mock.patch.object(app.window_runtime, "main", return_value=7) as cleanup_main,
+            mock.patch.object(app.process_singleton, "cleanup_previous_project_instances") as singleton,
+        ):
+            result = app.main()
+
+        self.assertEqual(7, result)
+        cleanup_main.assert_called_once_with(
+            [
+                "cleanup",
+                "--runtime-root",
+                "runtime-root",
+                "--runtime-dir",
+                "runtime-dir",
+            ]
+        )
+        singleton.assert_not_called()
+
+    def test_source_cleanup_command_uses_the_safe_python_launcher(self) -> None:
+        manager = make_manager()
+        with (
+            mock.patch.object(app.sys, "frozen", False, create=True),
+            mock.patch.object(
+                app,
+                "build_source_python_command",
+                return_value=["py.exe", "-3", "window_runtime.py"],
+            ) as build_command,
+        ):
+            command = manager._runtime_cleanup_command()
+
+        build_command.assert_called_once_with(
+            app.sys.executable,
+            str(app.APP_DIR / "window_runtime.py"),
+        )
+        self.assertEqual(
+            ["py.exe", "-3", "window_runtime.py", "cleanup"],
+            command,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
