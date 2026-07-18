@@ -11,6 +11,9 @@ public final class ChatStreamingState {
         if (job == null) {
             return "";
         }
+        if (job.isCompleted() && job.lastMessage != null && !job.lastMessage.isBlank()) {
+            return job.lastMessage;
+        }
         if (job.liveText != null && !job.liveText.isBlank()) {
             return job.liveText;
         }

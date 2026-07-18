@@ -361,7 +361,10 @@ public final class ChatActivity extends AppCompatActivity {
             watchingJobId = "";
             pendingUserMessage = null;
             setComposerEnabled(currentLease != null);
-            renderConversation(ChatStreamingState.resolveLiveText(activeJob), false);
+            String terminalText = ChatWatchState.shouldAppendTerminalText(activeJob, persistedMessages)
+                    ? ChatStreamingState.resolveLiveText(activeJob)
+                    : "";
+            renderConversation(terminalText, false);
             stickyBanner = ChatWatchState.displayError(activeJob);
             showBanner(stickyBanner);
             return;
@@ -370,6 +373,7 @@ public final class ChatActivity extends AppCompatActivity {
         watchingJobId = "";
         setComposerEnabled(currentLease != null);
         renderConversation(null);
+        stickyBanner = ChatWatchState.bannerAfterCleanRefresh(currentLease != null, stickyBanner);
         if (stickyBanner != null && !stickyBanner.isEmpty()) {
             showBanner(stickyBanner);
         } else {
@@ -597,14 +601,20 @@ public final class ChatActivity extends AppCompatActivity {
                 });
                 return;
             }
-            if (!finalJob.isCompleted()) {
+            if (ChatWatchState.shouldRefreshTerminalSession(finalJob) && !finalJob.isCompleted()) {
                 PortalJob failedJob = finalJob;
+                String failedSessionId = failedJob.sessionId == null || failedJob.sessionId.isEmpty()
+                        ? sessionId
+                        : failedJob.sessionId;
+                SessionPayload failedPayload = apiClient.fetchSession(endpoint, failedSessionId);
                 watchGeneration++;
                 runOnUiThread(() -> {
                     attachedJobId = "";
                     watchingJobId = "";
+                    pendingUserMessage = null;
+                    adoptSessionId(failedSessionId);
                     setComposerEnabled(currentLease != null);
-                    renderConversation(ChatStreamingState.resolveLiveText(failedJob), false);
+                    renderPayload(failedPayload);
                     stickyBanner = ChatWatchState.displayError(failedJob);
                     showBanner(stickyBanner);
                 });
@@ -612,7 +622,19 @@ public final class ChatActivity extends AppCompatActivity {
             }
 
             String requestedSessionId = finalJob.sessionId == null || finalJob.sessionId.isEmpty() ? sessionId : finalJob.sessionId;
-            SessionPayload payload = apiClient.fetchSession(endpoint, requestedSessionId);
+            SessionPayload payload;
+            int finalRefreshAttempt = 0;
+            do {
+                payload = apiClient.fetchSession(endpoint, requestedSessionId);
+                if (!ChatWatchState.shouldRetryFinalRefresh(finalJob, payload.messages, finalRefreshAttempt)) {
+                    break;
+                }
+                finalRefreshAttempt++;
+                Thread.sleep(600L);
+            } while (generation == watchGeneration);
+            if (generation != watchGeneration) {
+                return;
+            }
             String nextSessionId = requestedSessionId;
             if (payload.session != null && payload.session.sessionId != null && !payload.session.sessionId.isEmpty()) {
                 nextSessionId = payload.session.sessionId;
@@ -631,6 +653,7 @@ public final class ChatActivity extends AppCompatActivity {
             }
             final SessionLease resolvedLease = nextLease;
             final String resolvedSessionId = nextSessionId;
+            final SessionPayload resolvedPayload = payload;
             watchGeneration++;
             runOnUiThread(() -> {
                 attachedJobId = "";
@@ -639,7 +662,7 @@ public final class ChatActivity extends AppCompatActivity {
                 currentLease = resolvedLease;
                 adoptSessionId(resolvedSessionId);
                 setComposerEnabled(currentLease != null);
-                renderPayload(payload);
+                renderPayload(resolvedPayload);
                 showBanner("Reply received.");
             });
         } catch (Exception exception) {

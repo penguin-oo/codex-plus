@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -8,6 +9,91 @@ import token_pool_settings
 
 
 class ProxyRoutingTests(unittest.TestCase):
+    def test_apply_standard_preset_persists_form_edits_before_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            token_pool_settings.save_backend_settings(
+                backend_mode=token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+                settings_file=settings_file,
+                proxy_api_key="proxy-key",
+                openai_base_url="https://old.example/v1",
+                openai_api_key="old-key",
+                openai_model="old-model",
+                openai_models=["old-model"],
+                openai_protocol=token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+            )
+            token_pool_settings.save_openai_preset(
+                settings_file=settings_file,
+                preset_id="standard-provider",
+                name="Old Name",
+                openai_base_url="https://old.example/v1",
+                openai_api_key="old-key",
+                openai_model="old-model",
+                openai_models=["old-model"],
+                openai_protocol=token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+                proxy_preference="direct",
+                skip_validation=False,
+                set_active=True,
+            )
+            manager = object.__new__(app.SessionManagerApp)
+
+            def resolve_config(
+                base_url: str,
+                api_key: str,
+                model: str,
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                return {
+                    "openai_base_url": base_url,
+                    "openai_api_key": api_key,
+                    "openai_model": model,
+                    "openai_models": [model],
+                    "openai_protocol": token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+                }
+
+            with (
+                mock.patch.object(
+                    token_pool_settings,
+                    "resolve_openai_compatible_backend_config",
+                    side_effect=resolve_config,
+                ),
+                mock.patch.object(app, "_swap_installation_id_for_preset"),
+                mock.patch.object(app, "_patch_claude_settings_for_preset"),
+                mock.patch.object(app, "_patch_image_generation_for_preset"),
+                mock.patch.object(app.time, "sleep"),
+                mock.patch.object(manager, "_stop_token_pool_proxy"),
+                mock.patch.object(manager, "_start_openai_compatible_proxy"),
+                mock.patch.object(manager, "_load_available_models", return_value=[]),
+                mock.patch.object(manager, "_render_models"),
+            ):
+                updated = manager._apply_openai_compatible_preset_settings(
+                    "standard-provider",
+                    settings_file=settings_file,
+                    preset_name="New Name",
+                    openai_base_url="https://new.example/v1",
+                    openai_api_key="new-key",
+                    openai_model="new-model",
+                    openai_protocol=token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS,
+                    proxy_preference="proxy",
+                    disable_image_generation=True,
+                )
+
+            preset = next(
+                item
+                for item in updated["openai_presets"]
+                if item["id"] == "standard-provider"
+            )
+            self.assertEqual("https://new.example/v1", updated["openai_base_url"])
+            self.assertEqual("new-key", updated["openai_api_key"])
+            self.assertEqual("new-model", updated["openai_model"])
+            self.assertEqual(
+                token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS,
+                updated["openai_protocol"],
+            )
+            self.assertEqual("New Name", preset["name"])
+            self.assertEqual("proxy", preset["proxy_preference"])
+            self.assertTrue(preset["disable_image_generation"])
+
     def test_responses_network_proxy_does_not_require_local_adapter(self) -> None:
         settings = {
             "openai_protocol": token_pool_settings.OPENAI_PROTOCOL_RESPONSES,

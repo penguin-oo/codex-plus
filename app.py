@@ -2859,53 +2859,52 @@ class SessionManagerApp:
         existing = token_pool_settings.load_backend_settings(settings_file)
         existing_preset = _find_openai_preset(existing, preset_id)
         resolved_disable_image_generation = _resolve_disable_image_generation(existing_preset, disable_image_generation)
-        if bool(existing_preset.get("skip_validation", False)):
-            selected_model = (
-                openai_model.strip()
-                if openai_model is not None
-                else str(existing_preset.get("openai_model", "")).strip()
-            )
-            token_pool_settings.save_openai_preset(
-                settings_file=settings_file,
-                preset_id=preset_id.strip(),
-                name=(
-                    preset_name.strip()
-                    if preset_name is not None and preset_name.strip()
-                    else str(existing_preset.get("name", preset_id)).strip() or preset_id.strip()
-                ),
-                openai_base_url=(
-                    openai_base_url.strip()
-                    if openai_base_url is not None and openai_base_url.strip()
-                    else str(existing_preset.get("openai_base_url", token_pool_settings.DEFAULT_OPENAI_BASE_URL))
-                ),
-                openai_api_key=(
-                    openai_api_key.strip()
-                    if openai_api_key is not None and openai_api_key.strip()
-                    else str(existing_preset.get("openai_api_key", ""))
-                ),
-                openai_model=selected_model,
-                openai_models=_merge_openai_models(
-                    existing_preset.get("openai_models", []),
-                    [str(item).strip() for item in existing_preset.get("openai_manual_extra_models", []) or [] if str(item).strip()],
-                    selected_model,
-                ),
-                openai_protocol=_resolved_manual_openai_protocol(
-                    openai_protocol or "",
-                    str(existing_preset.get("openai_protocol", "")),
-                ),
-                openai_manual_extra_models=existing_preset.get("openai_manual_extra_models", []),
-                proxy_preference=(
-                    proxy_preference.strip()
-                    if proxy_preference is not None and proxy_preference.strip()
-                    else str(existing_preset.get("proxy_preference", "direct"))
-                ),
-                upstream_proxy_url=str(existing_preset.get("upstream_proxy_url", "")),
-                skip_validation=True,
-                installation_id=str(existing_preset.get("installation_id", "")),
-                claude_env=existing_preset.get("claude_env", {}),
-                disable_image_generation=resolved_disable_image_generation,
-                set_active=False,
-            )
+        selected_model = (
+            openai_model.strip()
+            if openai_model is not None
+            else str(existing_preset.get("openai_model", "")).strip()
+        )
+        token_pool_settings.save_openai_preset(
+            settings_file=settings_file,
+            preset_id=preset_id.strip(),
+            name=(
+                preset_name.strip()
+                if preset_name is not None and preset_name.strip()
+                else str(existing_preset.get("name", preset_id)).strip() or preset_id.strip()
+            ),
+            openai_base_url=(
+                openai_base_url.strip()
+                if openai_base_url is not None and openai_base_url.strip()
+                else str(existing_preset.get("openai_base_url", token_pool_settings.DEFAULT_OPENAI_BASE_URL))
+            ),
+            openai_api_key=(
+                openai_api_key.strip()
+                if openai_api_key is not None and openai_api_key.strip()
+                else str(existing_preset.get("openai_api_key", ""))
+            ),
+            openai_model=selected_model,
+            openai_models=_merge_openai_models(
+                existing_preset.get("openai_models", []),
+                [str(item).strip() for item in existing_preset.get("openai_manual_extra_models", []) or [] if str(item).strip()],
+                selected_model,
+            ),
+            openai_protocol=_resolved_manual_openai_protocol(
+                openai_protocol or "",
+                str(existing_preset.get("openai_protocol", "")),
+            ),
+            openai_manual_extra_models=existing_preset.get("openai_manual_extra_models", []),
+            proxy_preference=(
+                proxy_preference.strip()
+                if proxy_preference is not None and proxy_preference.strip()
+                else str(existing_preset.get("proxy_preference", "direct"))
+            ),
+            upstream_proxy_url=str(existing_preset.get("upstream_proxy_url", "")),
+            skip_validation=bool(existing_preset.get("skip_validation", False)),
+            installation_id=str(existing_preset.get("installation_id", "")),
+            claude_env=existing_preset.get("claude_env", {}),
+            disable_image_generation=resolved_disable_image_generation,
+            set_active=False,
+        )
         applied = token_pool_settings.apply_openai_preset(preset_id, settings_file=settings_file)
         applied_preset = next((item for item in applied.get("openai_presets", []) if isinstance(item, dict) and str(item.get("id", "")).strip() == preset_id.strip()), {})
         if bool(applied_preset.get("skip_validation", False)):
@@ -2927,7 +2926,10 @@ class SessionManagerApp:
             openai_api_key=str(resolved.get("openai_api_key", applied.get("openai_api_key", ""))),
             openai_model=str(resolved.get("openai_model", applied.get("openai_model", ""))),
             openai_models=resolved.get("openai_models", applied.get("openai_models", [])),
-            openai_protocol=str(resolved.get("openai_protocol", applied.get("openai_protocol", ""))),
+            openai_protocol=_resolved_manual_openai_protocol(
+                openai_protocol or "",
+                str(resolved.get("openai_protocol", applied.get("openai_protocol", ""))),
+            ),
             openai_manual_extra_models=applied.get("openai_manual_extra_models", []),
             upstream_proxy_url=str(applied.get("upstream_proxy_url", "")),
         )

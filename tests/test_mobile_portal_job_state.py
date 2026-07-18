@@ -1,4 +1,5 @@
 import unittest
+import json
 from unittest import mock
 
 import mobile_portal
@@ -87,6 +88,35 @@ class MobileJobStateTests(unittest.TestCase):
         self.assertEqual("", job["error"])
         self.assertEqual("insufficient quota", job["diagnostic_error"])
 
+    def test_non_object_json_event_is_ignored(self) -> None:
+        runner, session_id, job_id = self.make_running_job()
+
+        detected_session_id, completion_seen = runner._handle_codex_event(
+            job_id,
+            "standalone quoted tool output",
+            session_id,
+        )
+
+        self.assertEqual(session_id, detected_session_id)
+        self.assertFalse(completion_seen)
+        self.assertEqual("running", runner.jobs[job_id]["status"])
+
+    def test_event_handler_failure_terminates_codex_process_tree(self) -> None:
+        runner, session_id, job_id = self.make_running_job()
+        process = mock.Mock()
+        process.pid = 4242
+        process.stdout = iter([json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n"])
+
+        with (
+            mock.patch.object(mobile_portal.subprocess, "Popen", return_value=process),
+            mock.patch.object(runner, "_handle_codex_event", side_effect=RuntimeError("bad event")),
+            mock.patch.object(runner, "_terminate_pid", return_value=True) as terminate_pid,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bad event"):
+                runner._run_codex_process(job_id, ["codex"], ".", session_id)
+
+        terminate_pid.assert_called_once_with(4242)
+
     def test_agent_message_event_updates_live_partial_reply(self) -> None:
         runner, session_id, job_id = self.make_running_job()
         runner.jobs[job_id]["live_text"] = ""
@@ -110,6 +140,35 @@ class MobileJobStateTests(unittest.TestCase):
         self.assertFalse(completion_seen)
         self.assertEqual("partial reply from commentary", job["live_text"])
         self.assertEqual("partial reply from commentary", job["last_message"])
+
+    def test_turn_completed_promotes_latest_item_agent_message_to_final_answer(self) -> None:
+        runner, session_id, job_id = self.make_running_job()
+        runner.jobs[job_id]["live_text"] = ""
+        runner.jobs[job_id]["last_message"] = ""
+
+        _detected_session_id, message_completion_seen = runner._handle_codex_event(
+            job_id,
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "final answer from codex exec",
+                },
+            },
+            session_id,
+        )
+        detected_session_id, turn_completion_seen = runner._handle_codex_event(
+            job_id,
+            {"type": "turn.completed", "usage": {}},
+            session_id,
+        )
+
+        job = runner.jobs[job_id]
+        self.assertEqual(session_id, detected_session_id)
+        self.assertFalse(message_completion_seen)
+        self.assertTrue(turn_completion_seen)
+        self.assertTrue(job["has_final_answer"])
+        self.assertEqual("final answer from codex exec", job["last_message"])
 
     def test_cancel_job_recovers_partial_reply_from_rollout(self) -> None:
         runner = mobile_portal.JobRunner(FakeDataStore("rollout partial reply"))
@@ -177,6 +236,80 @@ class MobileJobStateTests(unittest.TestCase):
         )
         self.assertEqual("provider returned insufficient quota", job["diagnostic_error"])
         self.assertNotIn(session_id, runner.active_sessions)
+
+    def test_completed_finish_replaces_streamed_commentary_with_final_message(self) -> None:
+        runner, session_id, job_id = self.make_running_job()
+
+        runner._finish_job(
+            job_id,
+            "completed",
+            session_id,
+            "final answer",
+            release_session=session_id,
+        )
+
+        job = runner.jobs[job_id]
+        self.assertEqual("final answer", job["last_message"])
+        self.assertEqual("final answer", job["live_text"])
+
+    def test_completed_job_replaces_trailing_commentary_in_session_messages(self) -> None:
+        messages = [
+            {"role": "user", "ts": 100, "text": "question"},
+            {"role": "assistant", "ts": 110, "text": "working update"},
+        ]
+        job = {
+            "status": "completed",
+            "created_at": 100,
+            "finished_at": 120,
+            "last_message": "final answer",
+        }
+
+        reconciled = mobile_portal.reconcile_completed_job_message(messages, job)
+
+        self.assertEqual(
+            [
+                {"role": "user", "ts": 100, "text": "question"},
+                {"role": "assistant", "ts": 120, "text": "final answer"},
+            ],
+            reconciled,
+        )
+
+    def test_completed_job_preserves_newer_persisted_assistant_message(self) -> None:
+        messages = [
+            {"role": "user", "ts": 100, "text": "question"},
+            {"role": "assistant", "ts": 130, "text": "newer persisted answer"},
+        ]
+        job = {
+            "status": "completed",
+            "created_at": 100,
+            "finished_at": 120,
+            "last_message": "older job final",
+        }
+
+        reconciled = mobile_portal.reconcile_completed_job_message(messages, job)
+
+        self.assertEqual(messages, reconciled)
+
+    def test_completed_job_without_user_message_preserves_existing_history(self) -> None:
+        messages = [
+            {"role": "assistant", "ts": 90, "text": "older answer"},
+        ]
+        job = {
+            "status": "completed",
+            "created_at": 100,
+            "finished_at": 120,
+            "last_message": "final answer",
+        }
+
+        reconciled = mobile_portal.reconcile_completed_job_message(messages, job)
+
+        self.assertEqual(
+            [
+                {"role": "assistant", "ts": 90, "text": "older answer"},
+                {"role": "assistant", "ts": 120, "text": "final answer"},
+            ],
+            reconciled,
+        )
 
 
 if __name__ == "__main__":

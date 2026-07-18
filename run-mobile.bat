@@ -16,12 +16,12 @@ if errorlevel 1 (
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$svc = Get-Service -Name Tailscale -ErrorAction SilentlyContinue; if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name Tailscale -ErrorAction SilentlyContinue }" >nul 2>&1
 
-python mobile_portal.py
+python "%~dp0mobile_portal.py"
 if not errorlevel 1 goto :eof
 
 echo.
 echo Failed to start with python, trying py launcher...
-py -3 mobile_portal.py
+py -3 "%~dp0mobile_portal.py"
 if not errorlevel 1 goto :eof
 
 echo.

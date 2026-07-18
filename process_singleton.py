@@ -56,6 +56,8 @@ def _list_windows_processes() -> list[dict[str, object]]:
         command,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=10,
         creationflags=creationflags,
     )

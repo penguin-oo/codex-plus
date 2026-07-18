@@ -316,6 +316,69 @@ def copy_message_list(messages: list[dict[str, object]]) -> list[dict[str, objec
     return [dict(item) for item in messages]
 
 
+def reconcile_completed_job_message(
+    messages: list[dict[str, object]],
+    job: dict[str, object],
+) -> list[dict[str, object]]:
+    reconciled = copy_message_list(messages)
+    if str(job.get("status", "")) != "completed":
+        return reconciled
+    final_text = str(job.get("last_message", "")).strip()
+    if not final_text:
+        return reconciled
+
+    finished_at = int(job.get("finished_at", 0) or 0)
+    last_user_index = -1
+    last_user_ts = 0
+    for index, message in enumerate(reconciled):
+        if str(message.get("role", "")) != "user":
+            continue
+        last_user_index = index
+        last_user_ts = int(message.get("ts", 0) or 0)
+    if finished_at and last_user_ts > finished_at:
+        return reconciled
+
+    if last_user_index < 0:
+        if any(
+            str(message.get("role", "")) == "assistant"
+            and normalize_message_text(str(message.get("text", ""))) == normalize_message_text(final_text)
+            for message in reconciled
+        ):
+            return reconciled
+        return [
+            *reconciled,
+            {
+                "role": "assistant",
+                "ts": finished_at or int(job.get("created_at", 0) or 0),
+                "text": final_text,
+            },
+        ]
+
+    trailing_start = last_user_index + 1
+    for message in reconciled[trailing_start:]:
+        if str(message.get("role", "")) != "assistant":
+            continue
+        if finished_at and int(message.get("ts", 0) or 0) > finished_at:
+            return reconciled
+        if normalize_message_text(str(message.get("text", ""))) == normalize_message_text(final_text):
+            return reconciled
+
+    retained = [
+        message
+        for message in reconciled[trailing_start:]
+        if str(message.get("role", "")) != "assistant"
+    ]
+    return [
+        *reconciled[:trailing_start],
+        *retained,
+        {
+            "role": "assistant",
+            "ts": finished_at or int(job.get("created_at", 0) or 0),
+            "text": final_text,
+        },
+    ]
+
+
 def iso_to_ts(value: str) -> int:
     if not value:
         return 0
@@ -2448,6 +2511,13 @@ class CodexDataStore:
             self._messages_cache[session_id] = (cache_signature, copy_message_list(messages))
         return messages
 
+    def invalidate_messages_cache(self, session_id: str) -> None:
+        clean_session_id = session_id.strip()
+        if not clean_session_id:
+            return
+        with self.cache_lock:
+            self._messages_cache.pop(clean_session_id, None)
+
     def load_mcp_items(self) -> list[McpItem]:
         if not CONFIG_FILE.exists():
             return []
@@ -2895,6 +2965,27 @@ class JobRunner:
                 return None
             return json.loads(json.dumps(latest))
 
+    def latest_completed_job_for_session(self, session_id: str) -> dict[str, object] | None:
+        clean_session_id = session_id.strip()
+        if not clean_session_id:
+            return None
+        with self.lock:
+            latest: dict[str, object] | None = None
+            latest_ts = -1
+            for job in self.jobs.values():
+                if str(job.get("session_id", "")) != clean_session_id:
+                    continue
+                finished_at = int(job.get("finished_at", 0) or 0)
+                created_at = int(job.get("created_at", 0) or 0)
+                sort_ts = max(finished_at, created_at)
+                if sort_ts < latest_ts:
+                    continue
+                latest = job
+                latest_ts = sort_ts
+            if not latest or str(latest.get("status", "")) != "completed":
+                return None
+            return json.loads(json.dumps(latest))
+
     def claim_session(
         self,
         session_id: str,
@@ -3192,6 +3283,8 @@ class JobRunner:
                         or recovered_partial
                     )
                     job["last_message"] = retained_message
+                    if status == "completed" and retained_message:
+                        job["live_text"] = retained_message
                     if retained_message and not str(job.get("live_text", "")).strip():
                         job["live_text"] = retained_message
                     if status == "failed":
@@ -3204,6 +3297,10 @@ class JobRunner:
                     job["finished_at"] = now_ts()
             if release_session:
                 self.active_sessions.discard(release_session)
+        if status == "completed" and session_id:
+            invalidate_cache = getattr(self.data_store, "invalidate_messages_cache", None)
+            if callable(invalidate_cache):
+                invalidate_cache(session_id)
 
     def _run_resume_job(
         self,
@@ -3431,7 +3528,13 @@ class JobRunner:
                 if completion_deadline > 0.0:
                     completion_deadline = time.monotonic() + PROCESS_EXIT_GRACE_SECONDS
                 continue
-            detected_session_id, completion_seen = self._handle_codex_event(job_id, event, detected_session_id)
+            if not isinstance(event, dict):
+                continue
+            try:
+                detected_session_id, completion_seen = self._handle_codex_event(job_id, event, detected_session_id)
+            except Exception:
+                self._terminate_pid(int(process.pid))
+                raise
             if completion_seen or completion_deadline > 0.0:
                 completion_deadline = time.monotonic() + PROCESS_EXIT_GRACE_SECONDS
 
@@ -3461,7 +3564,9 @@ class JobRunner:
             process.kill()
             return process.wait(timeout=PROCESS_EXIT_GRACE_SECONDS)
 
-    def _handle_codex_event(self, job_id: str, event: dict[str, object], detected_session_id: str) -> tuple[str, bool]:
+    def _handle_codex_event(self, job_id: str, event: object, detected_session_id: str) -> tuple[str, bool]:
+        if not isinstance(event, dict):
+            return detected_session_id, False
         event_type = str(event.get("type", ""))
         if event_type == "error":
             error_message = str(event.get("message", "")).strip()
@@ -3496,11 +3601,15 @@ class JobRunner:
             return next_session_id, False
 
         if event_type == "turn.completed":
+            completion_seen = False
             with self.lock:
                 job = self.jobs.get(job_id)
                 if job:
                     job["heartbeat_at"] = now_ts()
-            return detected_session_id, False
+                    if str(job.get("last_message", "")).strip():
+                        job["has_final_answer"] = True
+                        completion_seen = True
+            return detected_session_id, completion_seen
 
         if event_type == "event_msg":
             payload = event.get("payload", {})
@@ -4344,7 +4453,11 @@ class PortalService:
             return None
         session = payload.get("session")
         active_job = self.jobs.active_job_for_session(session_id)
+        completed_job = None if active_job else self.jobs.latest_completed_job_for_session(session_id)
         messages = payload.get("messages")
+        if completed_job and isinstance(messages, list):
+            payload["messages"] = reconcile_completed_job_message(messages, completed_job)
+            messages = payload["messages"]
         if (
             active_job
             and isinstance(messages, list)
