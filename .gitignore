@@ -23,6 +23,12 @@ Thumbs.db
 tmp_*
 .worktrees/
 backup-before-*/
+/.backup-*/
+account_slots/
+auth.json
+cap_sid
+mobile_portal_settings.json
+mobile_portal_token.txt
 remote-*
 remote_*.ps1
 SESSION_HANDOFF.md

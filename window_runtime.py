@@ -9,7 +9,7 @@ import struct
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -279,13 +279,37 @@ def _copy_snapshot_files(base_home: Path, private_home: Path) -> None:
             shutil.copy2(source, private_home / file_name)
 
 
+def _sync_persistent_snapshot_files(base_home: Path, account_home: Path) -> None:
+    for file_name in SNAPSHOT_FILE_NAMES:
+        source = base_home / file_name
+        destination = account_home / file_name
+        if not source.is_file():
+            continue
+        if destination.is_file() and destination.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+            continue
+        temporary = account_home / f".{file_name}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def _share_files(base_home: Path, private_home: Path) -> None:
     for file_name in SHARED_FILE_NAMES:
         source = base_home / file_name
         if not source.is_file():
             continue
         destination = private_home / file_name
-        os.link(source, destination)
+        if destination.exists():
+            if not destination.samefile(source):
+                raise WindowRuntimeError(f"Shared runtime file points elsewhere: {destination}")
+            continue
+        try:
+            os.link(source, destination)
+        except FileExistsError:
+            if not destination.samefile(source):
+                raise
 
 
 def _create_windows_junction(link: Path, target: Path) -> None:
@@ -401,11 +425,17 @@ def _create_windows_junctions_with_cmd(pairs: list[tuple[Path, Path]], private_h
 
 
 def _create_directory_links(base_home: Path, private_home: Path) -> None:
-    pairs = [
-        (private_home / name, base_home / name)
-        for name in SHARED_DIRECTORY_NAMES
-        if (base_home / name).is_dir()
-    ]
+    pairs: list[tuple[Path, Path]] = []
+    for name in SHARED_DIRECTORY_NAMES:
+        target = base_home / name
+        link = private_home / name
+        if not target.is_dir():
+            continue
+        if link.exists() or link.is_symlink():
+            if not link.samefile(target):
+                raise WindowRuntimeError(f"Shared runtime directory points elsewhere: {link}")
+            continue
+        pairs.append((link, target))
     if not pairs:
         return
     if os.name != "nt":
@@ -471,6 +501,7 @@ def prepare_window_runtime(
     base_home: Path,
     *,
     isolate_home: bool,
+    copy_auth: bool = False,
     sqlite_home: Path | None = None,
     session_id: str = "",
     installation_id: str = "",
@@ -525,6 +556,11 @@ def prepare_window_runtime(
         if runtime.isolated:
             runtime.codex_home.mkdir()
             _copy_snapshot_files(base_home, runtime.codex_home)
+            if copy_auth:
+                for file_name in ("auth.json", "cap_sid"):
+                    source = base_home / file_name
+                    if source.is_file():
+                        shutil.copy2(source, runtime.codex_home / file_name)
             _share_files(base_home, runtime.codex_home)
             _create_directory_links(base_home, runtime.codex_home)
             (runtime.codex_home / "installation_id").write_text(
@@ -535,6 +571,73 @@ def prepare_window_runtime(
     except Exception:
         try:
             cleanup_window_runtime(runtime_dir, runtime_root)
+        except (OSError, WindowRuntimeError):
+            pass
+        raise
+
+
+def prepare_account_login_runtime(
+    base_home: Path,
+    *,
+    launch_id: str | None = None,
+    now: float | None = None,
+    process_alive: Callable[[int], bool] = is_process_alive,
+    pending_grace_seconds: float = DEFAULT_PENDING_GRACE_SECONDS,
+) -> WindowRuntime:
+    """Create a clean Codex home for one browser login.
+
+    Login must not reuse the selected account's auth files, cap_sid, SQLite
+    state, or installation identity. Otherwise a later login can invalidate
+    credentials that were already saved in another account slot.
+    """
+    runtime = prepare_window_runtime(
+        base_home=base_home,
+        isolate_home=True,
+        copy_auth=False,
+        sqlite_home=base_home,
+        installation_id=str(uuid.uuid4()),
+        launch_id=launch_id,
+        now=now,
+        process_alive=process_alive,
+        pending_grace_seconds=pending_grace_seconds,
+    )
+    runtime.pid_file.write_text(f"{os.getpid()}\n", encoding="ascii")
+    return runtime
+
+
+def prepare_account_runtime(
+    base_home: Path,
+    *,
+    account_home: Path,
+    sqlite_home: Path | None = None,
+    session_id: str = "",
+) -> WindowRuntime:
+    """Keep one persistent auth cache per account while sharing session data."""
+    base_home = _absolute_path(base_home)
+    account_home = _absolute_path(account_home)
+    if account_home.parent != base_home / "account_slots" or _is_reparse_point(account_home):
+        raise WindowRuntimeError(f"Account runtime home is outside account slots: {account_home}")
+    if not (account_home / "auth.json").is_file():
+        raise FileNotFoundError(f"Saved auth file not found: {account_home / 'auth.json'}")
+    runtime = prepare_window_runtime(
+        base_home=base_home,
+        isolate_home=False,
+        sqlite_home=sqlite_home,
+        session_id=session_id,
+    )
+    try:
+        _sync_persistent_snapshot_files(base_home, account_home)
+        _share_files(base_home, account_home)
+        _create_directory_links(base_home, account_home)
+        installation_file = account_home / "installation_id"
+        if not installation_file.is_file():
+            installation_file.write_text(_baseline_installation_id(base_home, "") + "\n", encoding="utf-8")
+        account_runtime = replace(runtime, codex_home=account_home, isolated=True)
+        _write_manifest(account_runtime, time.time())
+        return account_runtime
+    except Exception:
+        try:
+            cleanup_window_runtime(runtime.runtime_dir, runtime.runtime_root)
         except (OSError, WindowRuntimeError):
             pass
         raise

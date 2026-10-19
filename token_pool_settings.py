@@ -17,9 +17,18 @@ CODEX_HOME = USERPROFILE / '.codex'
 DEFAULT_TOKEN_POOL_DIR = USERPROFILE / '.cli-proxy-api'
 DEFAULT_SETTINGS_FILE = CODEX_HOME / 'token_pool_settings.json'
 DEFAULT_MODELS_CACHE_FILE = CODEX_HOME / 'models_cache.json'
+DEFAULT_CODEX_AUTH_MODEL_CATALOG_FILE = CODEX_HOME / 'codex_auth_model_catalog.json'
+DEFAULT_CODEX_CONFIG_FILE = CODEX_HOME / 'config.toml'
 DEFAULT_PROXY_PORT = 8317
 CODEX_CONTEXT_WINDOW = 512_000
 CODEX_AUTO_COMPACT_TOKEN_LIMIT = 460_000
+CODEX_RESERVE_MODEL = 'gpt-reserve'
+CODEX_GPT6_MODEL_IDS = ('gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna')
+CODEX_GPT6_CATALOG_SOURCES = {
+    'gpt-6.1-sol': 'gpt-5.6-sol',
+    'gpt-6-sol': 'gpt-5.6-sol',
+    'gpt-6-luna': 'gpt-5.6-luna',
+}
 BACKEND_MODE_CODEX_AUTH = 'codex_auth'
 BACKEND_MODE_TOKEN_POOL = 'built_in_token_pool'
 BACKEND_MODE_OPENAI_COMPATIBLE = 'openai_compatible'
@@ -55,6 +64,58 @@ def build_codex_context_override_args() -> list[str]:
         '-c',
         f'model_auto_compact_token_limit={CODEX_AUTO_COMPACT_TOKEN_LIMIT}',
     ]
+
+
+def configured_codex_auth_model(
+    config_file: Path = DEFAULT_CODEX_CONFIG_FILE,
+) -> str:
+    """Read the current official-auth model without importing a TOML package."""
+    try:
+        config_text = config_file.read_text(encoding='utf-8-sig')
+    except OSError:
+        return ''
+    for line in config_text.splitlines():
+        match = re.match(r'^\s*model\s*=\s*["\']([^"\']+)["\']\s*$', line)
+        if match:
+            return match.group(1).strip()
+    return ''
+
+
+def _active_openai_preset(settings: dict[str, object]) -> dict[str, object] | None:
+    active_id = str(settings.get('active_openai_preset_id', '')).strip()
+    presets = settings.get('openai_presets', [])
+    if not active_id or not isinstance(presets, list):
+        return None
+    for item in presets:
+        if isinstance(item, dict) and str(item.get('id', '')).strip() == active_id:
+            return item
+    return None
+
+
+def resolve_codex_auth_launch_model(
+    model: object,
+    settings: dict[str, object],
+) -> str:
+    """Keep a provider-specific model from leaking into official-auth launches."""
+    clean_model = str(model).strip()
+    configured_model = configured_codex_auth_model()
+    active_preset = _active_openai_preset(settings)
+    preset_models: set[str] = set()
+    if active_preset is not None:
+        preset_model = str(active_preset.get('openai_model', '')).strip()
+        if preset_model:
+            preset_models.add(preset_model)
+        raw_models = active_preset.get('openai_models', [])
+        if isinstance(raw_models, (list, tuple)):
+            preset_models.update(str(item).strip() for item in raw_models if str(item).strip())
+
+    if clean_model and clean_model != 'default':
+        if clean_model == CODEX_RESERVE_MODEL:
+            return clean_model
+        if configured_model and clean_model in preset_models:
+            return configured_model
+        return clean_model
+    return configured_model or 'gpt-6.1-sol'
 
 
 def _current_codex_client_version() -> str:
@@ -96,6 +157,141 @@ def _prepare_codex_models_cache(payload: dict[str, object]) -> bool:
 
 def _touch_codex_models_cache(payload: dict[str, object]) -> None:
     payload['fetched_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def ensure_codex_auth_reserve_model_visible(
+    *,
+    models_cache_file: Path = DEFAULT_MODELS_CACHE_FILE,
+) -> bool:
+    """Make the official-auth reserve model available to the CLI ``/model`` menu."""
+    if not models_cache_file.exists():
+        return False
+    try:
+        payload = json.loads(models_cache_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or not isinstance(payload.get('models'), list):
+        return False
+
+    reserve_model = next(
+        (
+            item
+            for item in payload['models']
+            if isinstance(item, dict)
+            and str(item.get('slug', '')).strip() == CODEX_RESERVE_MODEL
+        ),
+        None,
+    )
+    if reserve_model is None:
+        return False
+
+    changed = _prepare_codex_models_cache(payload)
+    if str(reserve_model.get('visibility', '')).strip() != 'list':
+        reserve_model['visibility'] = 'list'
+        changed = True
+    if not changed:
+        return False
+
+    _touch_codex_models_cache(payload)
+    try:
+        models_cache_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + '\n',
+            encoding='utf-8',
+        )
+    except OSError:
+        return False
+    return True
+
+
+def ensure_codex_auth_model_catalog(
+    *,
+    models_cache_file: Path = DEFAULT_MODELS_CACHE_FILE,
+    catalog_file: Path = DEFAULT_CODEX_AUTH_MODEL_CATALOG_FILE,
+) -> Path | None:
+    """Create a static official-auth catalog with reserve and GPT-6 variants visible."""
+    if not models_cache_file.exists():
+        return None
+    try:
+        payload = json.loads(models_cache_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get('models'), list):
+        return None
+
+    catalog_models: list[dict[str, object]] = []
+    models_by_slug: dict[str, dict[str, object]] = {}
+    reserve_found = False
+    for item in payload['models']:
+        if not isinstance(item, dict):
+            continue
+        cloned = dict(item)
+        if str(cloned.get('slug', '')).strip() == CODEX_RESERVE_MODEL:
+            cloned['visibility'] = 'list'
+            reserve_found = True
+        catalog_models.append(cloned)
+        clean_slug = str(cloned.get('slug', '')).strip()
+        if clean_slug:
+            models_by_slug[clean_slug] = cloned
+    if not reserve_found:
+        return None
+
+    for target_slug, source_slug in CODEX_GPT6_CATALOG_SOURCES.items():
+        if target_slug in models_by_slug:
+            continue
+        source = models_by_slug.get(source_slug)
+        if source is None:
+            continue
+        cloned = dict(source)
+        cloned['slug'] = target_slug
+        cloned['display_name'] = {
+            'gpt-6.1-sol': 'GPT-6.1-Sol',
+            'gpt-6-sol': 'GPT-6-Sol',
+            'gpt-6-luna': 'GPT-6-Luna',
+        }.get(target_slug, target_slug)
+        cloned['description'] = (
+            'Built to power complex coding and agentic workflows.'
+            if target_slug.endswith('sol')
+            else 'Our most efficient model for focused, high-volume tasks.'
+        )
+        cloned['default_reasoning_level'] = 'medium'
+        reasoning_levels = (
+            ('low', 'medium', 'high', 'xhigh', 'max')
+            if target_slug == 'gpt-6.1-sol'
+            else ('none', 'low', 'medium', 'high', 'xhigh', 'max')
+        )
+        cloned['supported_reasoning_levels'] = [
+            {'effort': effort, 'description': f'{effort.title()} reasoning'}
+            for effort in reasoning_levels
+        ]
+        cloned['visibility'] = 'list'
+        cloned['supported_in_api'] = True
+        cloned['context_window'] = CODEX_CONTEXT_WINDOW
+        cloned['max_context_window'] = CODEX_CONTEXT_WINDOW
+        catalog_models.append(cloned)
+        models_by_slug[target_slug] = cloned
+
+    serialized = json.dumps(
+        {'models': catalog_models},
+        ensure_ascii=False,
+        indent=2,
+    ) + '\n'
+    try:
+        if catalog_file.exists() and catalog_file.read_text(encoding='utf-8') == serialized:
+            return catalog_file
+        catalog_file.parent.mkdir(parents=True, exist_ok=True)
+        catalog_file.write_text(serialized, encoding='utf-8')
+    except OSError:
+        return None
+    return catalog_file
+
+
+def build_codex_auth_model_catalog_override_args() -> list[str]:
+    """Return the CLI override that pins the official-auth model catalog."""
+    catalog_file = ensure_codex_auth_model_catalog()
+    if catalog_file is None:
+        return []
+    catalog_path = catalog_file.resolve().as_posix()
+    return ['-c', f'model_catalog_json="{catalog_path}"']
 
 
 def ensure_codex_model_context_metadata(

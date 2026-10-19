@@ -33,9 +33,205 @@ def make_manager() -> app.SessionManagerApp:
 
 class ContextWindowTests(unittest.TestCase):
     def test_gpt6_model_is_the_shared_default(self) -> None:
-        self.assertEqual("gpt-6-astra", app.DEFAULT_PRIMARY_MODEL)
-        self.assertEqual("gpt-6-astra", app.DEFAULT_LAUNCH_MODEL)
-        self.assertEqual("gpt-6-astra", mobile_portal.DEFAULT_PRIMARY_MODEL)
+        self.assertEqual("gpt-6.1-sol", app.DEFAULT_PRIMARY_MODEL)
+        self.assertEqual("gpt-6.1-sol", app.DEFAULT_LAUNCH_MODEL)
+        self.assertEqual("gpt-6.1-sol", mobile_portal.DEFAULT_PRIMARY_MODEL)
+
+    def test_gpt61_sol_is_in_every_default_model_catalog(self) -> None:
+        self.assertIn("gpt-6.1-sol", app.FALLBACK_MODEL_OPTIONS)
+        self.assertIn("gpt-6.1-sol", mobile_portal.FALLBACK_MODEL_OPTIONS)
+        self.assertIn("gpt-6.1-sol", custom_provider_proxy.DEFAULT_MODEL_IDS)
+        self.assertIn("gpt-6.1-sol", token_pool_proxy.DEFAULT_MODEL_IDS)
+        self.assertIn("gpt-6.1-sol", app.merge_available_models([]))
+        self.assertIn("gpt-6.1-sol", mobile_portal.default_model_options([]))
+
+    def test_gpt6_sol_and_luna_are_available_in_desktop_and_mobile_choices(self) -> None:
+        for model_id in ("gpt-6-sol", "gpt-6-luna"):
+            self.assertIn(model_id, app.FALLBACK_MODEL_OPTIONS)
+            self.assertIn(model_id, mobile_portal.FALLBACK_MODEL_OPTIONS)
+            self.assertIn(model_id, app.merge_available_models([]))
+            self.assertIn(model_id, mobile_portal.default_model_options([]))
+
+    def test_codex_auth_catalog_adds_gpt6_sol_and_luna_from_updated_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "models_cache.json"
+            catalog_file = Path(temp_dir) / "codex-auth-model-catalog.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list"},
+                            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
+                            {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"},
+                            {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = token_pool_settings.ensure_codex_auth_model_catalog(
+                models_cache_file=cache_file,
+                catalog_file=catalog_file,
+            )
+
+            self.assertEqual(catalog_file, result)
+            payload = json.loads(catalog_file.read_text(encoding="utf-8"))
+            by_slug = {item["slug"]: item for item in payload["models"]}
+            for model_id in ("gpt-6-sol", "gpt-6-luna"):
+                self.assertIn(model_id, by_slug)
+                self.assertEqual("list", by_slug[model_id]["visibility"])
+                self.assertEqual(512_000, by_slug[model_id]["context_window"])
+                self.assertIn(
+                    "none",
+                    {item["effort"] for item in by_slug[model_id]["supported_reasoning_levels"]},
+                )
+
+    def test_proxy_default_model_catalog_includes_gpt6_family(self) -> None:
+        for model_id in ("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
+            self.assertIn(model_id, custom_provider_proxy.DEFAULT_MODEL_IDS)
+            self.assertIn(model_id, token_pool_proxy.DEFAULT_MODEL_IDS)
+
+    def test_codex_auth_catalog_adds_gpt61_sol_with_supported_reasoning_levels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "models_cache.json"
+            catalog_file = Path(temp_dir) / "codex-auth-model-catalog.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
+                            {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            token_pool_settings.ensure_codex_auth_model_catalog(
+                models_cache_file=cache_file,
+                catalog_file=catalog_file,
+            )
+            models = json.loads(catalog_file.read_text(encoding="utf-8"))["models"]
+            model = next(item for item in models if item["slug"] == "gpt-6.1-sol")
+            self.assertEqual("GPT-6.1-Sol", model["display_name"])
+            self.assertEqual(512_000, model["context_window"])
+            self.assertEqual(
+                ["low", "medium", "high", "xhigh", "max"],
+                [item["effort"] for item in model["supported_reasoning_levels"]],
+            )
+
+    def test_gpt_reserve_is_only_in_codex_auth_model_catalog(self) -> None:
+        self.assertIn("gpt-reserve", app.merge_available_models([], include_codex_reserve=True))
+        self.assertNotIn("gpt-reserve", app.merge_available_models([]))
+        self.assertIn("gpt-reserve", mobile_portal.merge_available_models([], include_codex_reserve=True))
+        self.assertNotIn("gpt-reserve", mobile_portal.merge_available_models([]))
+
+    def test_desktop_codex_auth_launch_passes_gpt_reserve_to_cli(self) -> None:
+        manager = make_manager()
+        manager.model_var = FakeVar("gpt-reserve")
+        settings = {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH}
+        with mock.patch.object(token_pool_settings, "ensure_codex_model_context_metadata"):
+            args = manager._build_codex_new_args(settings)
+        self.assertIn(["-m", "gpt-reserve"], [args[index:index + 2] for index in range(len(args) - 1)])
+
+    def test_mobile_codex_auth_launch_passes_gpt_reserve_to_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "backend.json"
+            token_pool_settings.save_backend_settings(
+                backend_mode=token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+                settings_file=settings_file,
+            )
+            args = mobile_portal.build_new_chat_args(
+                Path(temp_dir) / "output.json",
+                "hello",
+                "gpt-reserve",
+                "default",
+                "default",
+                "default",
+                settings_file,
+            )
+        self.assertIn(["-m", "gpt-reserve"], [args[index:index + 2] for index in range(len(args) - 1)])
+
+    def test_auth_resume_does_not_reuse_active_openai_preset_model(self) -> None:
+        settings = {
+            "backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+            "active_openai_preset_id": "anyrouter",
+            "openai_model": "gpt-6-astra",
+            "openai_presets": [
+                {
+                    "id": "anyrouter",
+                    "openai_model": "gpt-6-astra",
+                    "openai_models": ["gpt-6-astra", "claude-fable-5-1"],
+                }
+            ],
+        }
+        with mock.patch.object(
+            token_pool_settings,
+            "configured_codex_auth_model",
+            return_value="gpt-5.6-luna",
+        ):
+            resolved = mobile_portal.resolve_launch_model_for_backend(
+                "gpt-6-astra",
+                settings,
+            )
+        self.assertEqual("gpt-5.6-luna", resolved)
+
+    def test_desktop_auth_global_default_uses_configured_account_model(self) -> None:
+        manager = make_manager()
+        manager.use_global_defaults_var = FakeVar(True)
+        settings = {
+            "backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+        }
+        with (
+            mock.patch.object(
+                token_pool_settings,
+                "configured_codex_auth_model",
+                return_value="gpt-5.6-luna",
+            ),
+            mock.patch.object(token_pool_settings, "ensure_codex_model_context_metadata"),
+        ):
+            args = manager._build_codex_new_args(settings)
+        self.assertIn(["-m", "gpt-5.6-luna"], [args[index:index + 2] for index in range(len(args) - 1)])
+
+    def test_desktop_and_mobile_resume_pass_gpt_reserve_to_cli(self) -> None:
+        manager = make_manager()
+        manager.model_var = FakeVar("gpt-reserve")
+        item = app.SessionItem(
+            session_id="reserve-session",
+            ts=0,
+            text="",
+            note="",
+            history_count=1,
+            cwd="D:\\workspace",
+            model="gpt-reserve",
+            approval_policy="never",
+            sandbox_mode="danger-full-access",
+            turn_id="",
+            session_file="",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "backend.json"
+            token_pool_settings.save_backend_settings(
+                backend_mode=token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+                settings_file=settings_file,
+            )
+            with mock.patch.object(token_pool_settings, "ensure_codex_model_context_metadata"):
+                desktop_args = manager._build_codex_resume_args(
+                    item,
+                    {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH},
+                )
+            mobile_args = mobile_portal.build_resume_args(
+                Path(temp_dir) / "output.json",
+                "reserve-session",
+                "continue",
+                "gpt-reserve",
+                "default",
+                "default",
+                "default",
+                backend_settings_file=settings_file,
+            )
+        self.assertIn(["-m", "gpt-reserve"], [desktop_args[index:index + 2] for index in range(len(desktop_args) - 1)])
+        self.assertIn(["-m", "gpt-reserve"], [mobile_args[index:index + 2] for index in range(len(mobile_args) - 1)])
 
     def test_context_override_is_512k_tokens_with_460k_compaction(self) -> None:
         self.assertEqual(
@@ -194,6 +390,132 @@ class ContextWindowTests(unittest.TestCase):
             for model in payload["models"]:
                 self.assertEqual(512_000, model["context_window"])
                 self.assertEqual(512_000, model["max_context_window"])
+
+    def test_codex_auth_reserve_model_is_visible_to_interactive_model_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "models_cache.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {"slug": "gpt-6-astra", "visibility": "list"},
+                            {"slug": "gpt-reserve", "visibility": "hide"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                token_pool_settings.ensure_codex_auth_reserve_model_visible(
+                    models_cache_file=cache_file,
+                )
+            )
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            reserve = next(model for model in payload["models"] if model["slug"] == "gpt-reserve")
+            self.assertEqual("list", reserve["visibility"])
+
+            self.assertFalse(
+                token_pool_settings.ensure_codex_auth_reserve_model_visible(
+                    models_cache_file=cache_file,
+                )
+            )
+
+    def test_codex_auth_static_catalog_keeps_reserve_visible_after_cache_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "models_cache.json"
+            catalog_file = Path(temp_dir) / "codex-auth-model-catalog.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {"slug": "gpt-6-astra", "visibility": "list"},
+                            {"slug": "gpt-reserve", "visibility": "hide"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = token_pool_settings.ensure_codex_auth_model_catalog(
+                models_cache_file=cache_file,
+                catalog_file=catalog_file,
+            )
+
+            self.assertEqual(catalog_file, result)
+            payload = json.loads(catalog_file.read_text(encoding="utf-8"))
+            self.assertEqual(2, len(payload["models"]))
+            reserve = next(model for model in payload["models"] if model["slug"] == "gpt-reserve")
+            self.assertEqual("list", reserve["visibility"])
+
+    def test_reserve_visibility_helper_does_not_add_model_to_generic_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "models_cache.json"
+            original = {"models": [{"slug": "gpt-6-astra", "visibility": "list"}]}
+            cache_file.write_text(json.dumps(original), encoding="utf-8")
+
+            self.assertFalse(
+                token_pool_settings.ensure_codex_auth_reserve_model_visible(
+                    models_cache_file=cache_file,
+                )
+            )
+            self.assertEqual(original, json.loads(cache_file.read_text(encoding="utf-8")))
+
+    def test_auth_launches_pass_static_model_catalog_to_cli(self) -> None:
+        manager = make_manager()
+        manager.model_var = FakeVar("gpt-reserve")
+        settings = {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH}
+        catalog_file = Path("C:/Users/windows/.codex/codex_auth_model_catalog.json")
+
+        with (
+            mock.patch.object(token_pool_settings, "ensure_codex_auth_model_catalog", return_value=catalog_file),
+            mock.patch.object(token_pool_settings, "ensure_codex_model_context_metadata"),
+        ):
+            desktop_args = manager._build_codex_new_args(settings)
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                settings_file = Path(temp_dir) / "backend.json"
+                token_pool_settings.save_backend_settings(
+                    backend_mode=token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+                    settings_file=settings_file,
+                )
+                mobile_args = mobile_portal.build_new_chat_args(
+                    Path(temp_dir) / "output.json",
+                    "hello",
+                    "gpt-reserve",
+                    "default",
+                    "default",
+                    "default",
+                    settings_file,
+                )
+
+        expected = ['-c', 'model_catalog_json="C:/Users/windows/.codex/codex_auth_model_catalog.json"']
+        self.assertIn(expected, [desktop_args[index:index + 2] for index in range(len(desktop_args) - 1)])
+        self.assertIn(expected, [mobile_args[index:index + 2] for index in range(len(mobile_args) - 1)])
+
+    def test_mobile_codex_auth_loader_exposes_reserve_in_shared_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "backend.json"
+            cache_file = Path(temp_dir) / "models_cache.json"
+            settings_file.write_text(
+                json.dumps({"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH}),
+                encoding="utf-8",
+            )
+            cache_file.write_text(
+                json.dumps({"models": [{"slug": "gpt-reserve", "visibility": "hide"}]}),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(mobile_portal, "BACKEND_SETTINGS_FILE", settings_file),
+                mock.patch.object(mobile_portal, "MODELS_CACHE_FILE", cache_file),
+            ):
+                models = mobile_portal.CodexDataStore().load_available_models()
+
+            self.assertIn("gpt-reserve", models)
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            reserve = next(model for model in payload["models"] if model["slug"] == "gpt-reserve")
+            self.assertEqual("list", reserve["visibility"])
 
     def test_openai_compatible_cache_metadata_is_upgraded_to_512k(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -362,14 +684,14 @@ class ContextWindowTests(unittest.TestCase):
             ),
         )
 
-    def test_desktop_runtime_refreshes_its_private_model_cache(self) -> None:
+    def test_desktop_runtime_refreshes_active_account_model_cache(self) -> None:
         manager = make_manager()
         manager.model_var = FakeVar("default")
         runtime = window_runtime.WindowRuntime(
             launch_id="launch-test",
             runtime_root=Path("D:/codex-runtime"),
             runtime_dir=Path("D:/codex-runtime/launch-test"),
-            codex_home=Path("D:/codex-runtime/launch-test/home"),
+            codex_home=Path("C:/Users/windows/.codex/account_slots/slot-2"),
             sqlite_home=Path("C:/Users/windows/.codex"),
             isolated=True,
             session_id="",
@@ -379,13 +701,23 @@ class ContextWindowTests(unittest.TestCase):
         }
 
         with (
-            mock.patch.object(app.window_runtime, "prepare_window_runtime", return_value=runtime),
+            mock.patch.object(app.auth_slots, "detect_active_slot", return_value="slot-2"),
+            mock.patch.object(app.window_runtime, "prepare_account_runtime", return_value=runtime),
             mock.patch.object(token_pool_settings, "ensure_codex_model_context_metadata") as ensure,
+            mock.patch.object(token_pool_settings, "ensure_codex_auth_reserve_model_visible") as expose_reserve,
+            mock.patch.object(
+                token_pool_settings,
+                "configured_codex_auth_model",
+                return_value="gpt-5.6-luna",
+            ),
         ):
             manager._prepare_window_runtime(settings, session_id="")
 
+        expose_reserve.assert_called_once_with(
+            models_cache_file=runtime.codex_home / "models_cache.json",
+        )
         ensure.assert_called_once_with(
-            [app.DEFAULT_PRIMARY_MODEL],
+            ["gpt-5.6-luna"],
             models_cache_file=runtime.codex_home / "models_cache.json",
         )
 

@@ -29,8 +29,10 @@ from urllib import error as url_error
 from urllib import request as url_request
 
 import remote_ssh
+import session_context_repair
 import token_pool_proxy
 import token_pool_settings
+import window_runtime
 
 try:
     import tomllib
@@ -70,15 +72,19 @@ DERIVED_SESSION_FILE_MARKERS = (
     ".lightweight-memory-candidate-",
     ".memory-recovery-",
     ".goal-clear-backup-",
+    session_context_repair.AUTH_PROVIDER_REPAIR_BACKUP_MARKER,
 )
 OWNER_HEARTBEAT_TIMEOUT_SECONDS = 30
 PROCESS_EXIT_GRACE_SECONDS = 1.0
 PROCESS_STARTUP_NO_OUTPUT_TIMEOUT_SECONDS = 300.0
 PROCESS_MAX_RUNTIME_SECONDS = 0.0
 INCOMPLETE_REPLY_PLACEHOLDER = "This reply ended without a final answer. Please continue or retry."
-DEFAULT_PRIMARY_MODEL = "gpt-6-astra"
+DEFAULT_PRIMARY_MODEL = "gpt-6.1-sol"
 FALLBACK_MODEL_OPTIONS = (
     DEFAULT_PRIMARY_MODEL,
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-luna",
     "gpt-5.6-terra",
     "gpt-5.5",
@@ -570,6 +576,8 @@ def tokens_match(candidate: str, expected: str) -> bool:
 def resolve_launch_model_for_backend(model: str, backend_settings: dict[str, object]) -> str:
     clean_model = str(model).strip()
     mode = backend_settings.get("backend_mode")
+    if mode == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+        return token_pool_settings.resolve_codex_auth_launch_model(clean_model, backend_settings)
     if mode != token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
         if clean_model and clean_model != "default":
             return clean_model
@@ -620,10 +628,13 @@ def build_resume_args(
     reasoning_effort: str,
     image_paths: list[Path] | None = None,
     backend_settings_file: Path = BACKEND_SETTINGS_FILE,
+    cwd: str = "",
 ) -> list[str]:
     args = [CODEX_BIN, "exec", "--json", "-o", str(output_file), "--skip-git-repo-check"]
     args.extend(token_pool_settings.build_codex_context_override_args())
     backend_settings = token_pool_settings.load_backend_settings(backend_settings_file)
+    if backend_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+        args.extend(token_pool_settings.build_codex_auth_model_catalog_override_args())
     resolved_model = resolve_launch_model_for_backend(model, backend_settings)
     token_pool_settings.ensure_codex_model_context_metadata([resolved_model])
     ensure_openai_compatible_launch_model_metadata(backend_settings, resolved_model)
@@ -636,6 +647,8 @@ def build_resume_args(
     if reasoning_effort and reasoning_effort != "default":
         args.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
     args.extend(build_backend_override_args(backend_settings_file=backend_settings_file))
+    if cwd.strip():
+        args.extend(["-C", cwd.strip()])
     args.append("resume")
     for image_path in image_paths or []:
         args.extend(["-i", str(image_path)])
@@ -658,6 +671,8 @@ def build_new_chat_args(
     args = [CODEX_BIN, "exec", "--json", "-o", str(output_file)]
     args.extend(token_pool_settings.build_codex_context_override_args())
     backend_settings = token_pool_settings.load_backend_settings(backend_settings_file)
+    if backend_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+        args.extend(token_pool_settings.build_codex_auth_model_catalog_override_args())
     resolved_model = resolve_launch_model_for_backend(model, backend_settings)
     token_pool_settings.ensure_codex_model_context_metadata([resolved_model])
     ensure_openai_compatible_launch_model_metadata(backend_settings, resolved_model)
@@ -900,6 +915,7 @@ def run_text_command(args: list[str], timeout_seconds: float = 3.0) -> str:
 
 def run_codex_browser_login(
     settings_file: Path = PORTAL_SETTINGS_FILE,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -911,7 +927,7 @@ def run_codex_browser_login(
             encoding="utf-8",
             errors="ignore",
             check=False,
-            env=build_codex_subprocess_env(settings_file=settings_file),
+            env=env if env is not None else build_codex_subprocess_env(settings_file=settings_file),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("Failed to start Codex login.") from exc
@@ -1485,6 +1501,45 @@ def build_codex_subprocess_env(
     return env
 
 
+def prepare_mobile_codex_runtime(
+    backend_settings: dict[str, object],
+    *,
+    session_id: str = "",
+) -> window_runtime.WindowRuntime:
+    """Share persistent auth within an account and history across accounts."""
+    mode = str(backend_settings.get("backend_mode", "")).strip()
+    if mode == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+        active_slot = auth_slots.detect_active_slot(
+            codex_home=CODEX_HOME,
+            slots_dir=CODEX_HOME / "account_slots",
+        )
+        if active_slot:
+            return window_runtime.prepare_account_runtime(
+                CODEX_HOME,
+                account_home=CODEX_HOME / "account_slots" / active_slot,
+                sqlite_home=CODEX_HOME,
+                session_id=session_id,
+            )
+        return window_runtime.prepare_window_runtime(
+            base_home=CODEX_HOME,
+            isolate_home=False,
+            sqlite_home=CODEX_HOME,
+            session_id=session_id,
+        )
+    installation_id = (
+        str(backend_settings.get("installation_id", "")).strip()
+        if mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE
+        else ""
+    )
+    return window_runtime.prepare_window_runtime(
+        base_home=CODEX_HOME,
+        isolate_home=True,
+        sqlite_home=CODEX_HOME,
+        session_id=session_id,
+        installation_id=installation_id,
+    )
+
+
 def current_proxy_summary_from_settings(proxy_settings: dict[str, object]) -> str:
     if not bool(proxy_settings.get("proxy_enabled", DEFAULT_PROXY_ENABLED)):
         return "direct"
@@ -1674,13 +1729,22 @@ def openai_compatible_proxy_config_fingerprint_for_settings(settings: dict[str, 
 
 
 def openai_compatible_requires_local_proxy(settings: dict[str, object]) -> bool:
-    return str(settings.get("openai_protocol", "")).strip() == token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS
+    protocol = str(settings.get("openai_protocol", "")).strip()
+    if protocol == token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS:
+        return True
+    return custom_provider_proxy.is_legacy_anyrouter_base_url(
+        str(settings.get("openai_base_url", ""))
+    )
 
 
 def openai_compatible_proxy_health_matches_settings(health: object, settings: dict[str, object]) -> bool:
     if not backend_health_matches(health, token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE):
         return False
     if not isinstance(health, dict):
+        return False
+    if custom_provider_proxy.is_legacy_anyrouter_base_url(
+        str(settings.get("openai_base_url", ""))
+    ) and str(health.get("compatibility_version", "")).strip() != custom_provider_proxy.LEGACY_ANYROUTER_COMPATIBILITY_VERSION:
         return False
     expected = openai_compatible_proxy_config_fingerprint_for_settings(settings)
     return str(health.get("config_fingerprint", "")).strip() == expected
@@ -1978,11 +2042,27 @@ def list_windows_process_rows() -> list[dict[str, object]]:
     return []
 
 
-def merge_available_models(models: list[str]) -> list[str]:
+def merge_available_models(
+    models: list[str],
+    *,
+    include_codex_reserve: bool = False,
+) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
-    for model in (DEFAULT_PRIMARY_MODEL, *models, *FALLBACK_MODEL_OPTIONS[1:]):
+    candidates = (
+        DEFAULT_PRIMARY_MODEL,
+        token_pool_settings.CODEX_RESERVE_MODEL,
+        *models,
+        *FALLBACK_MODEL_OPTIONS[1:],
+    ) if include_codex_reserve else (
+        DEFAULT_PRIMARY_MODEL,
+        *models,
+        *FALLBACK_MODEL_OPTIONS[1:],
+    )
+    for model in candidates:
         clean_model = str(model).strip()
+        if clean_model == token_pool_settings.CODEX_RESERVE_MODEL and not include_codex_reserve:
+            continue
         if not clean_model or clean_model in seen:
             continue
         seen.add(clean_model)
@@ -2756,9 +2836,16 @@ class CodexDataStore:
         return items
 
     def load_available_models(self) -> list[str]:
-        models_signature = path_signature(MODELS_CACHE_FILE)
         backend_settings_signature = path_signature(BACKEND_SETTINGS_FILE)
         backend_settings = token_pool_settings.load_backend_settings(BACKEND_SETTINGS_FILE)
+        include_codex_reserve = (
+            backend_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH
+        )
+        if include_codex_reserve:
+            token_pool_settings.ensure_codex_auth_reserve_model_visible(
+                models_cache_file=MODELS_CACHE_FILE,
+            )
+        models_signature = path_signature(MODELS_CACHE_FILE)
         if backend_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
             unique = unique_model_ids(backend_settings.get("openai_models", []))
             saved_openai_model = str(backend_settings.get("openai_model", "")).strip()
@@ -2790,7 +2877,10 @@ class CodexDataStore:
                             models.append(slug)
             except Exception:
                 models = []
-        unique = merge_available_models(models)
+        unique = merge_available_models(
+            models,
+            include_codex_reserve=include_codex_reserve,
+        )
         with self.cache_lock:
             self._models_signature = models_signature
             self._models_cache = list(unique)
@@ -3426,25 +3516,11 @@ class JobRunner:
         image_paths: list[Path] | None = None,
     ) -> None:
         output_file = Path(tempfile.mkstemp(prefix="codex-mobile-out-", suffix=".txt")[1])
+        runtime: window_runtime.WindowRuntime | None = None
         with self.lock:
             job = self.jobs.get(job_id)
             if job:
                 job["output_file"] = str(output_file)
-        ensure_backend_proxy_ready(
-            backend_settings_file=self.backend_settings_file,
-            proxy_settings_file=self.proxy_settings_file,
-        )
-        args = build_resume_args(
-            output_file,
-            session_id,
-            prompt,
-            model,
-            sandbox,
-            approval,
-            reasoning_effort,
-            image_paths or [],
-            backend_settings_file=self.backend_settings_file,
-        )
         queued_at = now_ts()
         with self.lock:
             job = self.jobs.get(job_id)
@@ -3452,8 +3528,45 @@ class JobRunner:
                 queued_at = int(job.get("created_at", queued_at))
 
         try:
+            ensure_backend_proxy_ready(
+                backend_settings_file=self.backend_settings_file,
+                proxy_settings_file=self.proxy_settings_file,
+            )
+            backend_settings = token_pool_settings.load_backend_settings(self.backend_settings_file)
+            runtime = prepare_mobile_codex_runtime(backend_settings, session_id=session_id)
+            if (
+                backend_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH
+                and token_pool_settings.resolve_codex_auth_launch_model(model, backend_settings)
+                != str(model).strip()
+            ):
+                session_file = self.data_store.find_session_file(session_id)
+                if session_file:
+                    session_context_repair.repair_session_for_codex_auth(
+                        session_id,
+                        Path(session_file),
+                        thread_history_db=CODEX_HOME / "thread_history_1.sqlite",
+                    )
+            args = build_resume_args(
+                output_file,
+                session_id,
+                prompt,
+                model,
+                sandbox,
+                approval,
+                reasoning_effort,
+                image_paths or [],
+                backend_settings_file=self.backend_settings_file,
+                cwd=cwd,
+            )
             stdin_text = prompt if prompt.strip() else None
-            detected_session = self._run_codex_process(job_id, args, cwd, session_id, stdin_text=stdin_text)
+            detected_session = self._run_codex_process(
+                job_id,
+                args,
+                cwd,
+                session_id,
+                stdin_text=stdin_text,
+                runtime=runtime,
+            )
             history_text = build_history_entry_text(prompt, image_paths or [])
             target_session = detected_session or session_id
             if history_text and target_session:
@@ -3465,6 +3578,11 @@ class JobRunner:
         except Exception as exc:
             self._finish_job(job_id, "failed", session_id, "", str(exc), release_session=session_id)
         finally:
+            if runtime is not None:
+                try:
+                    window_runtime.cleanup_window_runtime(runtime.runtime_dir, runtime.runtime_root)
+                except (OSError, window_runtime.WindowRuntimeError):
+                    pass
             try:
                 output_file.unlink(missing_ok=True)
             except OSError:
@@ -3486,23 +3604,11 @@ class JobRunner:
         reasoning_effort: str,
     ) -> None:
         output_file = Path(tempfile.mkstemp(prefix="codex-mobile-out-", suffix=".txt")[1])
+        runtime: window_runtime.WindowRuntime | None = None
         with self.lock:
             job = self.jobs.get(job_id)
             if job:
                 job["output_file"] = str(output_file)
-        ensure_backend_proxy_ready(
-            backend_settings_file=self.backend_settings_file,
-            proxy_settings_file=self.proxy_settings_file,
-        )
-        args = build_new_chat_args(
-            output_file,
-            prompt,
-            model,
-            sandbox,
-            approval,
-            reasoning_effort,
-            backend_settings_file=self.backend_settings_file,
-        )
         queued_at = now_ts()
         with self.lock:
             job = self.jobs.get(job_id)
@@ -3510,7 +3616,29 @@ class JobRunner:
                 queued_at = int(job.get("created_at", queued_at))
 
         try:
-            session_id = self._run_codex_process(job_id, args, cwd, "", stdin_text=prompt)
+            ensure_backend_proxy_ready(
+                backend_settings_file=self.backend_settings_file,
+                proxy_settings_file=self.proxy_settings_file,
+            )
+            backend_settings = token_pool_settings.load_backend_settings(self.backend_settings_file)
+            runtime = prepare_mobile_codex_runtime(backend_settings)
+            args = build_new_chat_args(
+                output_file,
+                prompt,
+                model,
+                sandbox,
+                approval,
+                reasoning_effort,
+                backend_settings_file=self.backend_settings_file,
+            )
+            session_id = self._run_codex_process(
+                job_id,
+                args,
+                cwd,
+                "",
+                stdin_text=prompt,
+                runtime=runtime,
+            )
             opening_prompt_recorded = False
             last_message = output_file.read_text(encoding="utf-8", errors="ignore").strip() if output_file.exists() else ""
             if not last_message:
@@ -3529,6 +3657,11 @@ class JobRunner:
         except Exception as exc:
             self._finish_job(job_id, "failed", "", "", str(exc))
         finally:
+            if runtime is not None:
+                try:
+                    window_runtime.cleanup_window_runtime(runtime.runtime_dir, runtime.runtime_root)
+                except (OSError, window_runtime.WindowRuntimeError):
+                    pass
             try:
                 output_file.unlink(missing_ok=True)
             except OSError:
@@ -3541,7 +3674,15 @@ class JobRunner:
         cwd: str,
         fallback_session_id: str,
         stdin_text: str | None = None,
+        runtime: window_runtime.WindowRuntime | None = None,
     ) -> str:
+        process_env = build_codex_subprocess_env(
+            settings_file=self.proxy_settings_file,
+            backend_settings_file=self.backend_settings_file,
+        )
+        if runtime is not None:
+            process_env["CODEX_HOME"] = str(runtime.codex_home)
+            process_env["CODEX_SQLITE_HOME"] = str(runtime.sqlite_home)
         process = subprocess.Popen(
             args,
             cwd=cwd,
@@ -3551,10 +3692,7 @@ class JobRunner:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=build_codex_subprocess_env(
-                settings_file=self.proxy_settings_file,
-                backend_settings_file=self.backend_settings_file,
-            ),
+            env=process_env,
         )
         detected_session_id = fallback_session_id
         if stdin_text is not None and process.stdin is not None:
@@ -3938,10 +4076,22 @@ class PortalService:
         return self.account_slots_payload()
 
     def refresh_current_account(self) -> dict[str, object]:
-        active_slot = auth_slots.detect_active_slot()
-        refresh_current_chatgpt_auth(settings_file=self.proxy_settings_file)
+        slots_dir = CODEX_HOME / "account_slots"
+        active_slot = auth_slots.detect_active_slot(codex_home=CODEX_HOME, slots_dir=slots_dir)
         if active_slot:
-            auth_slots.save_current_auth_to_slot(active_slot)
+            account_home = slots_dir / active_slot
+            account_id = auth_slots.current_auth_info(codex_home=account_home).get("account_id", "")
+            refresh_current_chatgpt_auth(
+                auth_file=account_home / "auth.json",
+                settings_file=self.proxy_settings_file,
+            )
+            if account_id and auth_slots.current_auth_info(codex_home=CODEX_HOME).get("account_id") == account_id:
+                auth_slots.switch_to_auth_slot(active_slot, codex_home=CODEX_HOME, slots_dir=slots_dir)
+        else:
+            refresh_current_chatgpt_auth(
+                auth_file=CODEX_HOME / "auth.json",
+                settings_file=self.proxy_settings_file,
+            )
         self.request_desktop_refresh(source="account_refresh")
         return self.account_slots_payload()
 
@@ -3951,16 +4101,27 @@ class PortalService:
         registry = auth_slots.load_slot_registry()
         if not any(str(item.get("slot_id", "")).strip() == slot_id for item in registry):
             raise FileNotFoundError(f"Account slot '{slot_id}' not found.")
-        before_fingerprint = str(auth_slots.current_auth_info().get("fingerprint", "")).strip()
-        result = run_codex_browser_login(settings_file=self.proxy_settings_file)
-        if result.returncode != 0:
-            raise RuntimeError(summarize_login_failure(result))
-        after_fingerprint = str(auth_slots.current_auth_info().get("fingerprint", "")).strip()
-        if not after_fingerprint or after_fingerprint == before_fingerprint:
-            raise RuntimeError("Codex login finished but did not produce a new login.")
-        auth_slots.save_current_auth_to_slot(slot_id)
-        self.request_desktop_refresh(source="account_login_bind")
-        return self.account_slots_payload()
+        runtime = window_runtime.prepare_account_login_runtime(CODEX_HOME)
+        try:
+            before_fingerprint = str(
+                auth_slots.current_auth_info(codex_home=runtime.codex_home).get("fingerprint", "")
+            ).strip()
+            login_env = build_codex_subprocess_env(settings_file=self.proxy_settings_file)
+            login_env["CODEX_HOME"] = str(runtime.codex_home)
+            login_env["CODEX_SQLITE_HOME"] = str(runtime.codex_home)
+            result = run_codex_browser_login(settings_file=self.proxy_settings_file, env=login_env)
+            if result.returncode != 0:
+                raise RuntimeError(summarize_login_failure(result))
+            after_fingerprint = str(
+                auth_slots.current_auth_info(codex_home=runtime.codex_home).get("fingerprint", "")
+            ).strip()
+            if not after_fingerprint or after_fingerprint == before_fingerprint:
+                raise RuntimeError("Codex login finished but did not produce a new login.")
+            auth_slots.save_current_auth_to_slot(slot_id, codex_home=runtime.codex_home)
+            self.request_desktop_refresh(source="account_login_bind")
+            return self.account_slots_payload()
+        finally:
+            window_runtime.cleanup_window_runtime(runtime.runtime_dir, runtime.runtime_root)
 
     def switch_account(self, slot_id: str) -> dict[str, object]:
         if self.has_running_jobs():

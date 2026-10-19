@@ -17,6 +17,7 @@ import custom_provider_proxy
 import mobile_portal
 import process_singleton
 import remote_ssh
+import session_context_repair
 import token_pool_proxy
 import token_pool_settings
 import window_runtime
@@ -68,6 +69,7 @@ DERIVED_SESSION_FILE_MARKERS = (
     ".full-restored-archive-",
     ".lightweight-memory-candidate-",
     ".memory-recovery-",
+    session_context_repair.AUTH_PROVIDER_REPAIR_BACKUP_MARKER,
 )
 OPENAI_COMPAT_ENV_KEY_NAME = "CODEX_OPENAI_COMPATIBLE_API_KEY"
 CODEX_OFFICIAL_PROVIDER_NAME = "openai"
@@ -78,7 +80,7 @@ CODEX_API_ENV_KEY_NAMES = (
     OPENAI_COMPAT_ENV_KEY_NAME,
 )
 OPENAI_API_KEY_ENTRY_SHOW = ""
-DEFAULT_PRIMARY_MODEL = "gpt-6-astra"
+DEFAULT_PRIMARY_MODEL = "gpt-6.1-sol"
 DEFAULT_LAUNCH_MODEL = DEFAULT_PRIMARY_MODEL
 DEFAULT_LAUNCH_APPROVAL = "never"
 DEFAULT_LAUNCH_SANDBOX = "danger-full-access"
@@ -90,6 +92,9 @@ CODEX_FILE_OPENERS = frozenset(
 )
 FALLBACK_MODEL_OPTIONS = (
     DEFAULT_PRIMARY_MODEL,
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-luna",
     "gpt-5.6-terra",
     "gpt-5.5",
@@ -1439,7 +1444,7 @@ def read_current_weekly_quota(timeout_seconds: float = 4.0) -> dict[str, str]:
     return {"state": "ok", "summary": first_line or "Quota unavailable"}
 
 
-def run_codex_browser_login() -> subprocess.CompletedProcess[str]:
+def run_codex_browser_login(env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["codex.cmd", "login"],
@@ -1450,6 +1455,7 @@ def run_codex_browser_login() -> subprocess.CompletedProcess[str]:
             encoding="utf-8",
             errors="ignore",
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("Failed to start Codex login.") from exc
@@ -1457,8 +1463,10 @@ def run_codex_browser_login() -> subprocess.CompletedProcess[str]:
 
 def start_codex_browser_login_process(private_browser: bool = False, env: dict[str, str] | None = None) -> subprocess.Popen[str]:
     kwargs: dict[str, object] = {}
-    if private_browser:
-        kwargs["env"] = env or build_private_browser_login_env()
+    if env is None and private_browser:
+        env = build_private_browser_login_env()
+    if env is not None:
+        kwargs["env"] = env
     login_args = ["codex.cmd", "login", "--device-auth"] if private_browser else ["codex.cmd", "login"]
     try:
         process = subprocess.Popen(
@@ -1495,20 +1503,34 @@ def finalize_login_and_bind_account_slot(
     slot_id: str,
     before_fingerprint: str,
     result: subprocess.CompletedProcess[str],
+    *,
+    auth_home: Path = CODEX_HOME,
 ) -> dict[str, str]:
     if result.returncode != 0:
         raise RuntimeError(summarize_login_failure(result))
-    after_fingerprint = str(auth_slots.current_auth_info().get("fingerprint", "")).strip()
+    after_fingerprint = str(auth_slots.current_auth_info(codex_home=auth_home).get("fingerprint", "")).strip()
     if not after_fingerprint or after_fingerprint == before_fingerprint:
         raise RuntimeError("Codex login finished but did not produce a new login.")
-    return auth_slots.save_current_auth_to_slot(slot_id)
+    return auth_slots.save_current_auth_to_slot(slot_id, codex_home=auth_home)
 
 
 def login_and_bind_account_slot(slot_id: str) -> dict[str, str]:
     ensure_account_slot_exists(slot_id)
-    before_fingerprint = str(auth_slots.current_auth_info().get("fingerprint", "")).strip()
-    result = run_codex_browser_login()
-    return finalize_login_and_bind_account_slot(slot_id, before_fingerprint, result)
+    runtime = window_runtime.prepare_account_login_runtime(CODEX_HOME)
+    try:
+        before_fingerprint = str(auth_slots.current_auth_info(codex_home=runtime.codex_home).get("fingerprint", "")).strip()
+        login_env = dict(os.environ)
+        login_env["CODEX_HOME"] = str(runtime.codex_home)
+        login_env["CODEX_SQLITE_HOME"] = str(runtime.codex_home)
+        result = run_codex_browser_login(env=login_env)
+        return finalize_login_and_bind_account_slot(
+            slot_id,
+            before_fingerprint,
+            result,
+            auth_home=runtime.codex_home,
+        )
+    finally:
+        window_runtime.cleanup_window_runtime(runtime.runtime_dir, runtime.runtime_root)
 
 
 def format_account_slot_name(slot_id: str | None, slot_info: dict[str, str] | None = None) -> str:
@@ -1561,11 +1583,27 @@ def slot_supports_direct_login(slot_info: dict[str, str]) -> bool:
     return not bool(str(slot_info.get("fingerprint", "")).strip())
 
 
-def merge_available_models(models: list[str]) -> list[str]:
+def merge_available_models(
+    models: list[str],
+    *,
+    include_codex_reserve: bool = False,
+) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
-    for model in (DEFAULT_PRIMARY_MODEL, *models, *FALLBACK_MODEL_OPTIONS[1:]):
+    candidates = (
+        DEFAULT_PRIMARY_MODEL,
+        token_pool_settings.CODEX_RESERVE_MODEL,
+        *models,
+        *FALLBACK_MODEL_OPTIONS[1:],
+    ) if include_codex_reserve else (
+        DEFAULT_PRIMARY_MODEL,
+        *models,
+        *FALLBACK_MODEL_OPTIONS[1:],
+    )
+    for model in candidates:
         clean_model = str(model).strip()
+        if clean_model == token_pool_settings.CODEX_RESERVE_MODEL and not include_codex_reserve:
+            continue
         if not clean_model or clean_model in seen:
             continue
         seen.add(clean_model)
@@ -1617,13 +1655,21 @@ def _is_proxy_needed_for_openai_compatible(settings: dict[str, object]) -> bool:
         True if proxy is needed, False for direct connection
     """
     upstream_protocol = str(settings.get("openai_protocol", "")).strip()
-    return upstream_protocol == token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS
+    if upstream_protocol == token_pool_settings.OPENAI_PROTOCOL_CHAT_COMPLETIONS:
+        return True
+    return custom_provider_proxy.is_legacy_anyrouter_base_url(
+        str(settings.get("openai_base_url", ""))
+    )
 
 
 def openai_compatible_proxy_health_matches_settings(health: object, settings: dict[str, object]) -> bool:
     if not backend_health_matches(health, token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE):
         return False
     if not isinstance(health, dict):
+        return False
+    if custom_provider_proxy.is_legacy_anyrouter_base_url(
+        str(settings.get("openai_base_url", ""))
+    ) and str(health.get("compatibility_version", "")).strip() != custom_provider_proxy.LEGACY_ANYROUTER_COMPATIBILITY_VERSION:
         return False
     expected = openai_compatible_proxy_config_fingerprint_for_settings(settings)
     return str(health.get("config_fingerprint", "")).strip() == expected
@@ -2373,7 +2419,15 @@ class SessionManagerApp:
                             models.append(slug)
             except Exception:
                 models = []
-        return merge_available_models(models)
+        include_codex_reserve = (
+            isinstance(settings, dict)
+            and settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH
+        )
+        if include_codex_reserve:
+            token_pool_settings.ensure_codex_auth_reserve_model_visible(
+                models_cache_file=MODELS_CACHE_FILE,
+            )
+        return merge_available_models(models, include_codex_reserve=include_codex_reserve)
 
     def _render_models(self) -> None:
         values = ["default", *self.available_models]
@@ -2621,6 +2675,8 @@ class SessionManagerApp:
     def _build_codex_override_args(self, settings: dict[str, object] | None = None) -> list[str]:
         resolved_settings = settings if settings is not None else self._token_pool_settings()
         args: list[str] = token_pool_settings.build_codex_context_override_args()
+        if resolved_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+            args.extend(token_pool_settings.build_codex_auth_model_catalog_override_args())
         use_launch_defaults = self.use_global_defaults_var.get()
         if use_launch_defaults:
             launch_defaults = default_launch_options()
@@ -2636,6 +2692,12 @@ class SessionManagerApp:
             reasoning_var = getattr(self, "reasoning_effort_var", None)
             reasoning = reasoning_var.get().strip() if reasoning_var is not None else "default"
             search_enabled = self.search_var.get()
+
+        if resolved_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+            if use_launch_defaults:
+                model = token_pool_settings.configured_codex_auth_model() or model
+            else:
+                model = token_pool_settings.resolve_codex_auth_launch_model(model, resolved_settings)
 
         if (
             model
@@ -2716,6 +2778,8 @@ class SessionManagerApp:
     ) -> list[str]:
         resolved_settings = settings if settings is not None else self._token_pool_settings()
         args: list[str] = ["codex.cmd", "resume", item.session_id]
+        if item.cwd.strip():
+            args.extend(["-C", item.cwd.strip()])
         args.extend(self._build_codex_override_args(resolved_settings))
         if self._is_openai_compatible_backend_enabled(resolved_settings):
             backend_model = self._resolve_openai_compatible_launch_model(
@@ -2726,7 +2790,7 @@ class SessionManagerApp:
             args.extend(["-m", backend_model])
         else:
             backend_model = (
-                item.model.strip()
+                token_pool_settings.resolve_codex_auth_launch_model(item.model, resolved_settings)
                 or self._configured_backend_model(resolved_settings)
                 or DEFAULT_PRIMARY_MODEL
             )
@@ -2750,11 +2814,17 @@ class SessionManagerApp:
             self._ensure_openai_compatible_launch_model_metadata(resolved_settings, backend_model)
             args.extend(["-m", backend_model])
         else:
-            backend_model = (
-                selected_model
-                if selected_model and selected_model != "default"
-                else self._configured_backend_model(resolved_settings) or DEFAULT_PRIMARY_MODEL
-            )
+            if resolved_settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+                backend_model = (
+                    token_pool_settings.resolve_codex_auth_launch_model(selected_model, resolved_settings)
+                    or DEFAULT_PRIMARY_MODEL
+                )
+            else:
+                backend_model = (
+                    selected_model
+                    if selected_model and selected_model != "default"
+                    else self._configured_backend_model(resolved_settings) or DEFAULT_PRIMARY_MODEL
+                )
         token_pool_settings.ensure_codex_model_context_metadata([backend_model])
         args.extend(
             self._build_backend_override_args(backend_model, resolved_settings)
@@ -3422,7 +3492,6 @@ class SessionManagerApp:
                 token_pool_settings.BACKEND_MODE_CODEX_AUTH,
             )
         )
-        isolate_home = mode != token_pool_settings.BACKEND_MODE_CODEX_AUTH
         installation_id = (
             str(settings.get("installation_id", "")).strip()
             if mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE
@@ -3430,13 +3499,33 @@ class SessionManagerApp:
         )
         launch = codex_launch or self._resolve_terminal_codex_launch()
         sqlite_home = launch.sqlite_home if launch.sqlite_isolated else None
-        runtime = window_runtime.prepare_window_runtime(
-            base_home=CODEX_HOME,
-            isolate_home=isolate_home,
-            sqlite_home=sqlite_home,
-            session_id=session_id,
-            installation_id=installation_id,
-        )
+        if mode == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+            active_slot = auth_slots.detect_active_slot(
+                codex_home=CODEX_HOME,
+                slots_dir=CODEX_HOME / "account_slots",
+            )
+            if active_slot:
+                runtime = window_runtime.prepare_account_runtime(
+                    CODEX_HOME,
+                    account_home=CODEX_HOME / "account_slots" / active_slot,
+                    sqlite_home=sqlite_home,
+                    session_id=session_id,
+                )
+            else:
+                runtime = window_runtime.prepare_window_runtime(
+                    base_home=CODEX_HOME,
+                    isolate_home=False,
+                    sqlite_home=sqlite_home,
+                    session_id=session_id,
+                )
+        else:
+            runtime = window_runtime.prepare_window_runtime(
+                base_home=CODEX_HOME,
+                isolate_home=True,
+                sqlite_home=sqlite_home,
+                session_id=session_id,
+                installation_id=installation_id,
+            )
         selected_model = self.model_var.get().strip()
         if mode == token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE:
             backend_model = self._resolve_openai_compatible_launch_model(
@@ -3444,15 +3533,25 @@ class SessionManagerApp:
                 settings=settings,
             )
         else:
-            backend_model = (
-                selected_model
-                if selected_model and selected_model != "default"
-                else self._configured_backend_model(settings) or DEFAULT_PRIMARY_MODEL
-            )
+            if mode == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+                backend_model = (
+                    token_pool_settings.resolve_codex_auth_launch_model(selected_model, settings)
+                    or DEFAULT_PRIMARY_MODEL
+                )
+            else:
+                backend_model = (
+                    selected_model
+                    if selected_model and selected_model != "default"
+                    else self._configured_backend_model(settings) or DEFAULT_PRIMARY_MODEL
+                )
         token_pool_settings.ensure_codex_model_context_metadata(
             [backend_model],
             models_cache_file=runtime.codex_home / "models_cache.json",
         )
+        if mode == token_pool_settings.BACKEND_MODE_CODEX_AUTH:
+            token_pool_settings.ensure_codex_auth_reserve_model_visible(
+                models_cache_file=runtime.codex_home / "models_cache.json",
+            )
         return runtime
 
     def _runtime_cleanup_command(self) -> list[str | Path]:
@@ -4459,12 +4558,19 @@ class SessionManagerApp:
                 self.status_var.set(str(exc))
 
             def worker() -> None:
+                login_runtime: window_runtime.WindowRuntime | None = None
+                login_env: dict[str, str] | None = None
                 try:
                     ensure_account_slot_exists(slot_id)
-                    before_fingerprint = str(auth_slots.current_auth_info().get("fingerprint", "")).strip()
-                    login_env = None
+                    login_runtime = window_runtime.prepare_account_login_runtime(CODEX_HOME)
+                    before_fingerprint = str(
+                        auth_slots.current_auth_info(codex_home=login_runtime.codex_home).get("fingerprint", "")
+                    ).strip()
+                    login_env = dict(os.environ)
+                    login_env["CODEX_HOME"] = str(login_runtime.codex_home)
+                    login_env["CODEX_SQLITE_HOME"] = str(login_runtime.codex_home)
                     if private_browser:
-                        login_env = build_private_browser_login_env()
+                        login_env = build_private_browser_login_env(login_env)
                         apply_login_proxy_env(
                             login_env,
                             enabled=self.use_proxy_var.get(),
@@ -4510,17 +4616,14 @@ class SessionManagerApp:
                             except tk.TclError:
                                 pass
 
-                    try:
-                        if private_browser:
-                            stdout_text = collect_login_process_output(
-                                process,
-                                private_env=login_env,
-                                on_update=on_login_output,
-                            )
-                        else:
-                            stdout_text, _ = process.communicate()
-                    finally:
-                        cleanup_private_browser_login_env(getattr(process, "_codex_private_browser_env", None))
+                    if private_browser:
+                        stdout_text = collect_login_process_output(
+                            process,
+                            private_env=login_env,
+                            on_update=on_login_output,
+                        )
+                    else:
+                        stdout_text, _ = process.communicate()
                     result = subprocess.CompletedProcess(
                         process.args,
                         process.returncode if process.returncode is not None else 1,
@@ -4528,13 +4631,28 @@ class SessionManagerApp:
                     )
                     if state.get("cancelled"):
                         return
-                    bound_slot_info = finalize_login_and_bind_account_slot(slot_id, before_fingerprint, result)
+                    bound_slot_info = finalize_login_and_bind_account_slot(
+                        slot_id,
+                        before_fingerprint,
+                        result,
+                        auth_home=login_runtime.codex_home,
+                    )
                 except Exception as exc:
                     try:
                         self.root.after(0, lambda error=exc: on_error(error))
                     except tk.TclError:
                         pass
                     return
+                finally:
+                    cleanup_private_browser_login_env(login_env)
+                    if login_runtime is not None:
+                        try:
+                            window_runtime.cleanup_window_runtime(
+                                login_runtime.runtime_dir,
+                                login_runtime.runtime_root,
+                            )
+                        except (OSError, window_runtime.WindowRuntimeError):
+                            pass
                 try:
                     self.root.after(0, lambda info=bound_slot_info: on_success(info))
                 except tk.TclError:
@@ -4621,6 +4739,17 @@ class SessionManagerApp:
         try:
             settings = dict(self._token_pool_settings())
             self._ensure_backend_ready(settings)
+            if (
+                settings.get("backend_mode") == token_pool_settings.BACKEND_MODE_CODEX_AUTH
+                and item.session_file
+                and token_pool_settings.resolve_codex_auth_launch_model(item.model, settings)
+                != item.model.strip()
+            ):
+                session_context_repair.repair_session_for_codex_auth(
+                    item.session_id,
+                    Path(item.session_file),
+                    thread_history_db=CODEX_HOME / "thread_history_1.sqlite",
+                )
             codex_args = self._build_codex_resume_args(item, settings)
             codex_launch = self._resolve_terminal_codex_launch()
             runtime = self._prepare_window_runtime(

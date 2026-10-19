@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import time
+import uuid
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +16,10 @@ import token_pool_settings
 
 
 DEFAULT_MODEL_IDS = (
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",
@@ -38,6 +44,142 @@ _PASSTHROUGH_HEADER_NAMES = frozenset(
         "x-codex-window-id",
     }
 )
+_LEGACY_ANYROUTER_COMPAT_INSTRUCTIONS = (
+    "You are Codex, a coding agent based on GPT-5. "
+    "You are running in a local API compatibility proxy. "
+    "Answer the user's request directly and keep responses concise unless more detail is useful."
+)
+LEGACY_ANYROUTER_COMPATIBILITY_VERSION = "legacy-anyrouter-codex-v1"
+
+
+def is_legacy_anyrouter_base_url(url: str) -> bool:
+    """Return whether the endpoint uses AnyRouter's legacy Codex gate."""
+    try:
+        hostname = (url_parse.urlparse(str(url).strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return hostname == "anyrouter.top" or hostname.endswith(".anyrouter.top")
+
+
+def _header_value(headers: object | None, name: str) -> str:
+    if headers is None:
+        return ""
+    try:
+        items = headers.items()  # type: ignore[attr-defined]
+    except AttributeError:
+        return ""
+    expected = name.lower()
+    for raw_name, raw_value in items:
+        if str(raw_name).strip().lower() == expected:
+            return str(raw_value).strip()
+    return ""
+
+
+def prepare_legacy_anyrouter_responses_request(
+    payload: dict[str, object],
+    client_headers: object | None = None,
+) -> tuple[dict[str, object], dict[str, str]]:
+    """Add the request shape and fingerprints required by AnyRouter.top."""
+    prepared = dict(payload)
+    raw_metadata = prepared.get("client_metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+
+    installation_id = (
+        _header_value(client_headers, "x-codex-installation-id")
+        or str(metadata.get("installation_id", "")).strip()
+        or str(uuid.uuid4())
+    )
+    session_id = (
+        _header_value(client_headers, "session-id")
+        or str(metadata.get("session_id", "")).strip()
+        or str(uuid.uuid4())
+    )
+    thread_id = (
+        _header_value(client_headers, "thread-id")
+        or str(metadata.get("thread_id", "")).strip()
+        or session_id
+    )
+    turn_id = str(metadata.get("turn_id", "")).strip() or str(uuid.uuid4())
+    window_id = (
+        _header_value(client_headers, "x-codex-window-id")
+        or str(metadata.get("window_id", "")).strip()
+        or f"{session_id}:0"
+    )
+    metadata.update(
+        {
+            "installation_id": installation_id,
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "window_id": window_id,
+            "request_kind": str(metadata.get("request_kind", "turn")).strip() or "turn",
+            "sandbox": str(metadata.get("sandbox", "windows_elevated")).strip() or "windows_elevated",
+            "turn_started_at_unix_ms": int(metadata.get("turn_started_at_unix_ms", time.time() * 1000)),
+        }
+    )
+    prepared["client_metadata"] = metadata
+
+    input_value = prepared.get("input")
+    if isinstance(input_value, str):
+        prepared["input"] = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": input_value}],
+            }
+        ]
+    elif input_value is None:
+        prepared["input"] = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": ""}],
+            }
+        ]
+
+    if not str(prepared.get("instructions", "")).strip():
+        prepared["instructions"] = _LEGACY_ANYROUTER_COMPAT_INSTRUCTIONS
+    prepared.setdefault("stream", True)
+    prepared.setdefault("prompt_cache_key", session_id)
+    prepared.setdefault("store", False)
+    prepared.setdefault("parallel_tool_calls", True)
+    prepared.setdefault("tool_choice", "auto")
+    prepared.setdefault("include", ["reasoning.encrypted_content"])
+    prepared.setdefault("text", {"verbosity": "low"})
+    model = str(prepared.get("model", "")).strip()
+    if not prepared.get("reasoning") and model.startswith(("gpt-5", "gpt-6")):
+        prepared["reasoning"] = {"effort": "medium", "summary": "auto"}
+
+    turn_metadata = json.dumps(
+        {
+            "installation_id": installation_id,
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "window_id": window_id,
+            "request_kind": "turn",
+            "sandbox": "windows_elevated",
+            "turn_started_at_unix_ms": metadata["turn_started_at_unix_ms"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    compat_headers = {
+        "Accept": "text/event-stream",
+        "Originator": "Codex Desktop",
+        "User-Agent": (
+            "Codex Desktop/0.141.0 (Windows 10.0.19045; x86_64) "
+            "unknown (codex_exec; 0.141.0)"
+        ),
+        "session-id": session_id,
+        "thread-id": thread_id,
+        "x-client-request-id": _header_value(client_headers, "x-client-request-id") or session_id,
+        "x-codex-beta-features": "remote_compaction_v2",
+        "x-codex-installation-id": installation_id,
+        "x-codex-turn-metadata": turn_metadata,
+        "x-codex-window-id": window_id,
+    }
+    return prepared, compat_headers
 
 
 def _strip_blocked_tools(payload: dict[str, object]) -> dict[str, object]:
@@ -741,6 +883,11 @@ class CustomProviderProxyApp:
             "port": self.proxy_port,
             "protocol": self.upstream_protocol,
             "model_count": len(self.model_ids),
+            "compatibility_version": (
+                LEGACY_ANYROUTER_COMPATIBILITY_VERSION
+                if is_legacy_anyrouter_base_url(self.upstream_base_url)
+                else ""
+            ),
             "config_fingerprint": token_pool_settings.openai_compatible_proxy_config_fingerprint(
                 local_api_key=self.local_api_key,
                 upstream_base_url=self.upstream_base_url,
@@ -818,14 +965,22 @@ class CustomProviderProxyApp:
         payload: dict[str, object],
         client_headers: object | None = None,
     ) -> ForwardResponse | StreamingForwardResponse:
+        request_payload = payload
+        request_headers = build_upstream_headers(
+            upstream_api_key=self.upstream_api_key,
+            accept="text/event-stream" if payload.get("stream") else "application/json",
+            client_headers=client_headers,
+        )
+        if is_legacy_anyrouter_base_url(self.upstream_base_url):
+            request_payload, compat_headers = prepare_legacy_anyrouter_responses_request(
+                payload,
+                client_headers,
+            )
+            request_headers.update(compat_headers)
         request = url_request.Request(
             f"{self.upstream_base_url}{path}",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers=build_upstream_headers(
-                upstream_api_key=self.upstream_api_key,
-                accept="text/event-stream" if payload.get("stream") else "application/json",
-                client_headers=client_headers,
-            ),
+            data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+            headers=request_headers,
             method="POST",
         )
         try:

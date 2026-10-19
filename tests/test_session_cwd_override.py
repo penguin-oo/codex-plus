@@ -6,10 +6,19 @@ from unittest import mock
 
 import app
 import mobile_portal
+import token_pool_settings
 
 
 CURRENT_ID = "01a0201d-93fd-7682-a3e1-335a70661cc9"
 CORRECT_CWD = r"D:\codex\codex-session-manager-windows\codex-session-manager-windows-main"
+
+
+class FakeVar:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def get(self) -> object:
+        return self.value
 
 
 def make_mobile_session() -> mobile_portal.SessionItem:
@@ -85,6 +94,54 @@ class SessionCwdOverrideTests(unittest.TestCase):
                 items = manager._load_sessions(force=True)
 
         self.assertEqual(CORRECT_CWD, items[0].cwd)
+
+    def test_resume_commands_force_the_session_cwd_override(self) -> None:
+        manager = object.__new__(app.SessionManagerApp)
+        manager.use_global_defaults_var = FakeVar(False)
+        manager.model_var = FakeVar("gpt-5.6-sol")
+        manager.approval_var = FakeVar("never")
+        manager.sandbox_var = FakeVar("danger-full-access")
+        manager.reasoning_effort_var = FakeVar("max")
+        manager.search_var = FakeVar(False)
+        item = app.SessionItem(
+            session_id=CURRENT_ID,
+            ts=1,
+            text="current",
+            note="",
+            history_count=1,
+            cwd=CORRECT_CWD,
+            model="gpt-5.6-sol",
+            approval_policy="never",
+            sandbox_mode="danger-full-access",
+            turn_id="",
+            session_file="",
+        )
+        backend = {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH}
+        with (
+            mock.patch.object(token_pool_settings, "build_codex_auth_model_catalog_override_args", return_value=[]),
+            mock.patch.object(token_pool_settings, "ensure_codex_model_context_metadata"),
+        ):
+            desktop_args = manager._build_codex_resume_args(item, backend)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                settings_file = Path(temp_dir) / "backend.json"
+                token_pool_settings.save_backend_settings(
+                    backend_mode=token_pool_settings.BACKEND_MODE_CODEX_AUTH,
+                    settings_file=settings_file,
+                )
+                mobile_args = mobile_portal.build_resume_args(
+                    Path(temp_dir) / "output.json",
+                    CURRENT_ID,
+                    "continue",
+                    "gpt-5.6-sol",
+                    "default",
+                    "default",
+                    "default",
+                    backend_settings_file=settings_file,
+                    cwd=CORRECT_CWD,
+                )
+
+        self.assertIn(["-C", CORRECT_CWD], [desktop_args[i:i + 2] for i in range(len(desktop_args) - 1)])
+        self.assertIn(["-C", CORRECT_CWD], [mobile_args[i:i + 2] for i in range(len(mobile_args) - 1)])
 
 
 if __name__ == "__main__":

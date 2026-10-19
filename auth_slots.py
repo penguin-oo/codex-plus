@@ -25,6 +25,14 @@ def slot_dir(slot_id: str, slots_dir: Path = ACCOUNT_SLOTS_DIR) -> Path:
     return slots_dir / slot_id
 
 
+def auth_file_path(slot_id: str, slots_dir: Path = ACCOUNT_SLOTS_DIR) -> Path:
+    return slot_dir(slot_id, slots_dir) / AUTH_FILE_NAME
+
+
+def current_auth_file(codex_home: Path = CODEX_HOME) -> Path:
+    return codex_home / AUTH_FILE_NAME
+
+
 def slot_registry_path(slots_dir: Path = ACCOUNT_SLOTS_DIR) -> Path:
     return slots_dir / SLOT_REGISTRY_FILE_NAME
 
@@ -298,7 +306,7 @@ def save_current_auth_to_slot(
     codex_home: Path = CODEX_HOME,
     slots_dir: Path = ACCOUNT_SLOTS_DIR,
 ) -> dict[str, str]:
-    source_auth = codex_home / AUTH_FILE_NAME
+    source_auth = current_auth_file(codex_home)
     if not source_auth.exists():
         raise FileNotFoundError(f"Current auth file not found: {source_auth}")
     registry = load_slot_registry(slots_dir=slots_dir)
@@ -322,13 +330,27 @@ def save_current_auth_to_slot(
     save_slot_registry(registry, slots_dir=slots_dir)
     target_dir = slot_dir(slot_id, slots_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_auth, target_dir / AUTH_FILE_NAME)
+    target_auth = target_dir / AUTH_FILE_NAME
     source_cap_sid = codex_home / CAP_SID_FILE_NAME
     target_cap_sid = target_dir / CAP_SID_FILE_NAME
-    if source_cap_sid.exists():
-        shutil.copy2(source_cap_sid, target_cap_sid)
-    elif target_cap_sid.exists():
-        target_cap_sid.unlink()
+    source_info = current_auth_info(codex_home=codex_home)
+    target_info = read_auth_snapshot(target_auth, target_cap_sid)
+    preserve_refreshed_slot = (
+        codex_home == CODEX_HOME
+        and target_auth.is_file()
+        and bool(source_info.get("account_id"))
+        and source_info.get("account_id") == target_info.get("account_id")
+        and target_auth.stat().st_mtime_ns > source_auth.stat().st_mtime_ns
+    )
+    if not preserve_refreshed_slot:
+        shutil.copy2(source_auth, target_auth)
+        if source_cap_sid.exists():
+            shutil.copy2(source_cap_sid, target_cap_sid)
+        elif target_cap_sid.exists():
+            target_cap_sid.unlink()
+    source_installation = codex_home / "installation_id"
+    if codex_home != CODEX_HOME and source_installation.is_file():
+        shutil.copy2(source_installation, target_dir / "installation_id")
     info = get_slot_info(slot_id, slots_dir=slots_dir)
     info["active"] = "yes" if detect_active_slot(codex_home, slots_dir) == slot_id else "no"
     return info
@@ -340,11 +362,11 @@ def switch_to_auth_slot(
     slots_dir: Path = ACCOUNT_SLOTS_DIR,
 ) -> dict[str, str]:
     source_dir = slot_dir(slot_id, slots_dir)
-    source_auth = source_dir / AUTH_FILE_NAME
+    source_auth = auth_file_path(slot_id, slots_dir)
     if not source_auth.exists():
         raise FileNotFoundError(f"Saved auth for slot '{slot_id}' not found.")
     codex_home.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_auth, codex_home / AUTH_FILE_NAME)
+    shutil.copy2(source_auth, current_auth_file(codex_home))
     source_cap_sid = source_dir / CAP_SID_FILE_NAME
     target_cap_sid = codex_home / CAP_SID_FILE_NAME
     if source_cap_sid.exists():
@@ -366,8 +388,14 @@ def detect_active_slot(
     current_fingerprint = current.get("fingerprint", "")
     if not current_fingerprint:
         return None
+    matching_account_ids: list[str] = []
+    current_account_id = current.get("account_id", "")
     for item in load_slot_registry(slots_dir=slots_dir):
         slot_info = get_slot_info(item["slot_id"], slots_dir=slots_dir)
         if slot_info.get("fingerprint") == current_fingerprint:
             return item["slot_id"]
+        if current_account_id and slot_info.get("account_id") == current_account_id:
+            matching_account_ids.append(item["slot_id"])
+    if len(matching_account_ids) == 1:
+        return matching_account_ids[0]
     return None

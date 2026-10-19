@@ -361,14 +361,17 @@ class DesktopWindowLaunchTests(unittest.TestCase):
 
         self.assertEqual(["C:\\official\\codex.cmd"], resolved)
 
-    def test_runtime_isolated_for_non_auth_backends_only(self) -> None:
+    def test_auth_uses_persistent_account_home_and_custom_backend_isolated(self) -> None:
         manager = make_manager()
         runtime = make_runtime(Path("D:\\runtime"))
-        with mock.patch.object(
-            app.window_runtime,
-            "prepare_window_runtime",
-            return_value=runtime,
-        ) as prepare:
+        with (
+            mock.patch.object(app, "CODEX_HOME", Path("D:\\test-codex-home")),
+            mock.patch.object(app.auth_slots, "detect_active_slot", return_value="slot-1"),
+            mock.patch.object(app.window_runtime, "prepare_account_runtime", return_value=runtime) as prepare_auth,
+            mock.patch.object(app.window_runtime, "prepare_window_runtime", return_value=runtime) as prepare,
+            mock.patch.object(app.token_pool_settings, "ensure_codex_model_context_metadata"),
+            mock.patch.object(app.token_pool_settings, "ensure_codex_auth_reserve_model_visible"),
+        ):
             auth_result = manager._prepare_window_runtime(
                 {"backend_mode": token_pool_settings.BACKEND_MODE_CODEX_AUTH},
                 session_id="auth-session",
@@ -380,12 +383,16 @@ class DesktopWindowLaunchTests(unittest.TestCase):
 
         self.assertIs(runtime, auth_result)
         self.assertIs(runtime, custom_result)
-        self.assertFalse(prepare.call_args_list[0].kwargs["isolate_home"])
-        self.assertEqual("", prepare.call_args_list[0].kwargs["installation_id"])
-        self.assertTrue(prepare.call_args_list[1].kwargs["isolate_home"])
+        prepare_auth.assert_called_once_with(
+            Path("D:\\test-codex-home"),
+            account_home=Path("D:\\test-codex-home") / "account_slots" / "slot-1",
+            sqlite_home=None,
+            session_id="auth-session",
+        )
+        self.assertTrue(prepare.call_args.kwargs["isolate_home"])
         self.assertEqual(
             "snapshot-installation",
-            prepare.call_args_list[1].kwargs["installation_id"],
+            prepare.call_args.kwargs["installation_id"],
         )
 
     def test_new_chat_captures_settings_once_for_the_entire_launch(self) -> None:

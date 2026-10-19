@@ -6,11 +6,144 @@ from types import SimpleNamespace
 from unittest import mock
 
 import app
+import custom_provider_proxy
 import mobile_portal
 import token_pool_settings
 
 
 class ProxyRoutingTests(unittest.TestCase):
+    def test_legacy_anyrouter_endpoint_requires_local_responses_adapter(self) -> None:
+        self.assertTrue(custom_provider_proxy.is_legacy_anyrouter_base_url("https://anyrouter.top/v1"))
+        self.assertTrue(custom_provider_proxy.is_legacy_anyrouter_base_url("https://api.anyrouter.top/v1"))
+        self.assertFalse(custom_provider_proxy.is_legacy_anyrouter_base_url("https://anyrouter.dev/api/v1"))
+        settings = {
+            "openai_base_url": "https://anyrouter.top/v1",
+            "openai_protocol": token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+        }
+        self.assertTrue(app._is_proxy_needed_for_openai_compatible(settings))
+        self.assertTrue(mobile_portal.openai_compatible_requires_local_proxy(settings))
+
+    def test_legacy_anyrouter_adapter_adds_codex_request_shape_and_fingerprints(self) -> None:
+        payload, headers = custom_provider_proxy.prepare_legacy_anyrouter_responses_request(
+            {
+                "model": "gpt-6-astra",
+                "input": "Reply with OK.",
+            },
+            {},
+        )
+
+        self.assertIsInstance(payload["input"], list)
+        self.assertEqual("message", payload["input"][0]["type"])
+        self.assertEqual("Reply with OK.", payload["input"][0]["content"][0]["text"])
+        self.assertTrue(str(payload["instructions"]).strip())
+        self.assertIsInstance(payload["client_metadata"], dict)
+        self.assertEqual(False, payload["store"])
+        self.assertEqual(True, payload["parallel_tool_calls"])
+        self.assertEqual("auto", payload["tool_choice"])
+        self.assertEqual(["reasoning.encrypted_content"], payload["include"])
+        self.assertEqual({"verbosity": "low"}, payload["text"])
+        self.assertTrue(payload["prompt_cache_key"])
+        self.assertEqual(True, payload["stream"])
+        self.assertEqual("Codex Desktop", headers["Originator"])
+        self.assertEqual("text/event-stream", headers["Accept"])
+        self.assertTrue(headers["session-id"])
+        self.assertTrue(headers["thread-id"])
+        self.assertTrue(headers["x-codex-turn-metadata"])
+        self.assertTrue(headers["x-codex-window-id"])
+
+    def test_legacy_anyrouter_adapter_preserves_existing_codex_fields(self) -> None:
+        original = {
+            "model": "gpt-6-astra",
+            "input": [{"type": "message", "role": "user", "content": []}],
+            "instructions": "existing instructions",
+            "store": True,
+        }
+        payload, _headers = custom_provider_proxy.prepare_legacy_anyrouter_responses_request(
+            original,
+            {
+                "session-id": "session-1",
+                "thread-id": "thread-1",
+                "x-codex-installation-id": "installation-1",
+                "x-codex-window-id": "window-1",
+            },
+        )
+
+        self.assertEqual("existing instructions", payload["instructions"])
+        self.assertEqual(True, payload["store"])
+        self.assertEqual(original["input"], payload["input"])
+
+    def test_legacy_anyrouter_proxy_health_requires_compatibility_marker(self) -> None:
+        settings = {
+            "backend_mode": token_pool_settings.BACKEND_MODE_OPENAI_COMPATIBLE,
+            "proxy_api_key": "local-key",
+            "openai_base_url": "https://anyrouter.top/v1",
+            "openai_api_key": "upstream-key",
+            "openai_protocol": token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+            "openai_models": ["gpt-6-astra"],
+        }
+        proxy = custom_provider_proxy.CustomProviderProxyApp(
+            local_api_key="local-key",
+            proxy_port=8317,
+            upstream_base_url=settings["openai_base_url"],
+            upstream_api_key=settings["openai_api_key"],
+            upstream_protocol=settings["openai_protocol"],
+            model_ids=settings["openai_models"],
+        )
+        health = proxy.build_health_payload()
+
+        self.assertEqual(
+            custom_provider_proxy.LEGACY_ANYROUTER_COMPATIBILITY_VERSION,
+            health["compatibility_version"],
+        )
+        self.assertTrue(app.openai_compatible_proxy_health_matches_settings(health, settings))
+        self.assertTrue(mobile_portal.openai_compatible_proxy_health_matches_settings(health, settings))
+
+        old_health = dict(health)
+        old_health.pop("compatibility_version")
+        self.assertFalse(app.openai_compatible_proxy_health_matches_settings(old_health, settings))
+        self.assertFalse(mobile_portal.openai_compatible_proxy_health_matches_settings(old_health, settings))
+
+    def test_legacy_anyrouter_forwarding_uses_adapted_payload(self) -> None:
+        class FakeResponse:
+            status = 200
+            headers = {"content-type": "application/json"}
+
+            def getcode(self) -> int:
+                return self.status
+
+            def read(self) -> bytes:
+                return b'{"id":"resp_test","output":[{"type":"message","content":[]}]} '
+
+            def close(self) -> None:
+                return
+
+        proxy = custom_provider_proxy.CustomProviderProxyApp(
+            local_api_key="local-key",
+            proxy_port=8317,
+            upstream_base_url="https://anyrouter.top/v1",
+            upstream_api_key="upstream-key",
+            upstream_protocol=token_pool_settings.OPENAI_PROTOCOL_RESPONSES,
+            model_ids=["gpt-6-astra"],
+        )
+        with mock.patch.object(
+            custom_provider_proxy,
+            "_proxy_aware_urlopen",
+            return_value=FakeResponse(),
+        ) as open_url:
+            result = proxy._forward_responses_request(
+                "/responses",
+                {"model": "gpt-6-astra", "input": "Reply with OK."},
+                {},
+            )
+
+        request = open_url.call_args.args[0]
+        sent = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(200, result.status_code)
+        self.assertIsInstance(sent["input"], list)
+        self.assertTrue(sent["client_metadata"]["session_id"])
+        self.assertEqual("Codex Desktop", request.headers["Originator"])
+        self.assertEqual("text/event-stream", request.headers["Accept"])
+
     def test_save_proxy_settings_preserves_unknown_local_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = Path(temp_dir) / "mobile_portal_settings.json"

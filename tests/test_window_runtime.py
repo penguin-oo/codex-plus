@@ -101,6 +101,107 @@ class WindowRuntimeTests(unittest.TestCase):
             self.assertTrue((base_home / "skills" / "shared-skill.txt").exists())
             self.assertTrue((base_home / "generated_images" / "shared-image.txt").exists())
 
+    def test_isolated_auth_runtime_can_snapshot_auth_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_home = self.make_base_home(Path(temp_dir))
+            (base_home / "cap_sid").write_text("cap-session\n", encoding="utf-8")
+
+            runtime = window_runtime.prepare_window_runtime(
+                base_home=base_home,
+                isolate_home=True,
+                copy_auth=True,
+                launch_id="launch-auth-isolated",
+            )
+            try:
+                self.assertEqual(
+                    (base_home / "auth.json").read_text(encoding="utf-8"),
+                    (runtime.codex_home / "auth.json").read_text(encoding="utf-8"),
+                )
+                self.assertEqual(
+                    "cap-session\n",
+                    (runtime.codex_home / "cap_sid").read_text(encoding="utf-8"),
+                )
+            finally:
+                window_runtime.cleanup_window_runtime(runtime.runtime_dir, runtime.runtime_root)
+
+    def test_account_login_runtime_does_not_snapshot_auth_or_reuse_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_home = self.make_base_home(Path(temp_dir))
+            (base_home / "cap_sid").write_text("shared-cap-session\n", encoding="utf-8")
+
+            first = window_runtime.prepare_account_login_runtime(
+                base_home,
+                launch_id="login-one",
+            )
+            second = window_runtime.prepare_account_login_runtime(
+                base_home,
+                launch_id="login-two",
+            )
+            try:
+                self.assertFalse((first.codex_home / "auth.json").exists())
+                self.assertFalse((first.codex_home / "cap_sid").exists())
+                self.assertFalse((second.codex_home / "auth.json").exists())
+                self.assertFalse((second.codex_home / "cap_sid").exists())
+                first_installation = (first.codex_home / "installation_id").read_text(encoding="utf-8").strip()
+                second_installation = (second.codex_home / "installation_id").read_text(encoding="utf-8").strip()
+                self.assertTrue(first_installation)
+                self.assertNotEqual(first_installation, second_installation)
+                self.assertTrue((base_home / "auth.json").exists())
+                self.assertTrue((base_home / "cap_sid").exists())
+            finally:
+                window_runtime.cleanup_window_runtime(first.runtime_dir, first.runtime_root)
+                window_runtime.cleanup_window_runtime(second.runtime_dir, second.runtime_root)
+
+    def test_account_runtime_preserves_refreshed_auth_between_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_home = self.make_base_home(Path(temp_dir))
+            account_home = base_home / "account_slots" / "slot-1"
+            account_home.mkdir(parents=True)
+            (account_home / "auth.json").write_text('{"token":"original"}\n', encoding="utf-8")
+            (account_home / "installation_id").write_text("account-installation\n", encoding="utf-8")
+
+            first = window_runtime.prepare_account_runtime(
+                base_home,
+                account_home=account_home,
+                session_id="session-first",
+            )
+            try:
+                self.assertEqual(account_home, first.codex_home)
+                self.assertEqual(base_home, first.sqlite_home)
+                self.assertEqual((base_home / "sessions").resolve(), (account_home / "sessions").resolve())
+                (account_home / "auth.json").write_text('{"token":"refreshed"}\n', encoding="utf-8")
+            finally:
+                window_runtime.cleanup_window_runtime(first.runtime_dir, first.runtime_root)
+
+            second = window_runtime.prepare_account_runtime(
+                base_home,
+                account_home=account_home,
+                session_id="session-second",
+            )
+            try:
+                self.assertEqual('{"token":"refreshed"}\n', (second.codex_home / "auth.json").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    "account-installation",
+                    (second.codex_home / "installation_id").read_text(encoding="utf-8").strip(),
+                )
+            finally:
+                window_runtime.cleanup_window_runtime(second.runtime_dir, second.runtime_root)
+
+    def test_login_runtime_is_owned_while_browser_login_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_home = self.make_base_home(Path(temp_dir))
+            login = window_runtime.prepare_account_login_runtime(base_home, now=100.0)
+            try:
+                removed = window_runtime.cleanup_stale_window_runtimes(
+                    base_home,
+                    now=1000.0,
+                    process_alive=lambda pid: pid == os.getpid(),
+                )
+                self.assertEqual([], removed)
+                self.assertTrue(login.runtime_dir.exists())
+            finally:
+                window_runtime.cleanup_window_runtime(login.runtime_dir, login.runtime_root)
+
     def test_isolated_runtime_uses_original_installation_as_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base_home = self.make_base_home(Path(temp_dir))
